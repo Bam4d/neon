@@ -36,6 +36,7 @@ from neon.util.argparser import NeonArgparser
 parser = NeonArgparser(__doc__)
 args = parser.parse_args()
 
+
 class RNNTests(TestCase):
 
     def setUp(self):
@@ -51,7 +52,6 @@ class RNNTests(TestCase):
 
         # Weight initialization all to 0.1 so we can test this against the recursive network
         init = Constant(val=0.1)
-        #init = Uniform(min=-1.0, max=1.0)
 
         self.cost = GeneralizedCostMask(costfunc=SumSquared())
 
@@ -59,15 +59,15 @@ class RNNTests(TestCase):
 
         # Really simple vocab embedding set
         vocab = []
-        vocab.append(np.ones([1,wordVectorSize])*0.1)
-        vocab.append(np.ones([1,wordVectorSize])*0.15)
-        vocab.append(np.ones([1,wordVectorSize])*0.2)
-        vocab.append(np.ones([1,wordVectorSize])*0.25)
+        vocab.append(np.ones([1, wordVectorSize])*0.1)
+        vocab.append(np.ones([1, wordVectorSize])*0.15)
+        vocab.append(np.ones([1, wordVectorSize])*0.2)
+        vocab.append(np.ones([1, wordVectorSize])*0.25)
 
         self.targets_mask = (
             self.be.array(np.concatenate([
                 np.zeros([1, self.nouts]),
-                np.zeros([1 ,self.nouts]),
+                np.zeros([1, self.nouts]),
                 np.ones([1, self.nouts])*0.5])).T,
             self.be.array(np.concatenate([
                 np.zeros([1, self.nouts]),
@@ -78,8 +78,8 @@ class RNNTests(TestCase):
 
         embeddings = np.zeros([wordVectorSize, 4], dtype=np.float32)
 
-        for i ,k in enumerate(vocab):
-            embeddings[:,i] = np.array(k)
+        for i, k in enumerate(vocab):
+            embeddings[:, i] = np.array(k)
 
         # TODO: think of a better way of indexing this stuff, because currently this is a bit hacky and it does not make me
         # happy
@@ -125,9 +125,9 @@ class RNNTests(TestCase):
         self.recursive_model.initialize(self.dataset)
         x = self.recursive_model.fprop(self.tree_nodes[0][0])
 
-        self.assertAlmostEqual(x[:,0].get(), 0.53820, 4)
-        self.assertAlmostEqual(x[:,1].get(), 0.53850, 4)
-        self.assertAlmostEqual(x[:,2].get(), 0.53854, 4)
+        self.assertAlmostEqual(x[:, 0].get(), 0.53820, 4)
+        self.assertAlmostEqual(x[:, 1].get(), 0.53850, 4)
+        self.assertAlmostEqual(x[:, 2].get(), 0.53854, 4)
 
     def test_backward_pass(self):
         self.recursive_model.initialize(self.dataset)
@@ -135,16 +135,16 @@ class RNNTests(TestCase):
 
         deltas = self.cost.get_errors(x, self.targets_mask)
 
-        self.assertAlmostEqual(deltas[:,0].get(), 0.0, 4)
-        self.assertAlmostEqual(deltas[:,1].get(), 0.0, 4)
-        self.assertAlmostEqual(deltas[:,2].get(), 0.03854, 4)
+        self.assertAlmostEqual(deltas[:, 0].get(), 0.0, 4)
+        self.assertAlmostEqual(deltas[:, 1].get(), 0.0, 4)
+        self.assertAlmostEqual(deltas[:, 2].get(), 0.03854, 4)
 
         (embeddings_delta, h_delta) = self.recursive_model.bprop(deltas)
 
-        self.assertAlmostEqual(embeddings_delta[:,0].get(), 0.00000001467, 10)
-        self.assertAlmostEqual(embeddings_delta[:,1].get(), 0.00000001467, 10)
-        self.assertAlmostEqual(embeddings_delta[:,2].get(), 0.00000058941, 10)
-        self.assertAlmostEqual(embeddings_delta[:,3].get(), 0.00002375362, 10)
+        self.assertAlmostEqual(embeddings_delta[:, 0].get(), 0.00000001467, 10)
+        self.assertAlmostEqual(embeddings_delta[:, 1].get(), 0.00000001467, 10)
+        self.assertAlmostEqual(embeddings_delta[:, 2].get(), 0.00000058941, 10)
+        self.assertAlmostEqual(embeddings_delta[:, 3].get(), 0.00002375362, 10)
 
         self.assertAlmostEqual(h_delta[0], 0.00000058941, 10)
         self.assertAlmostEqual(h_delta[1], 0.00002375362, 10)

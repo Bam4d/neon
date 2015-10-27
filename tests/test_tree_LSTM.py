@@ -68,15 +68,15 @@ class RNNTests(TestCase):
 
         # Really simple vocab embedding set
         vocab = []
-        vocab.append(np.ones([1,wordVectorSize])*0.1)
-        vocab.append(np.ones([1,wordVectorSize])*0.15)
-        vocab.append(np.ones([1,wordVectorSize])*0.2)
-        vocab.append(np.ones([1,wordVectorSize])*0.25)
+        vocab.append(np.ones([1, wordVectorSize])*0.1)
+        vocab.append(np.ones([1, wordVectorSize])*0.15)
+        vocab.append(np.ones([1, wordVectorSize])*0.2)
+        vocab.append(np.ones([1, wordVectorSize])*0.25)
 
         self.targets_mask = (
             self.be.array(np.concatenate([
                 np.zeros([1, self.nouts]),
-                np.zeros([1 ,self.nouts]),
+                np.zeros([1, self.nouts]),
                 np.ones([1, self.nouts])*0.5])).T,
             self.be.array(np.concatenate([
                 np.zeros([1, self.nouts]),
@@ -87,8 +87,8 @@ class RNNTests(TestCase):
 
         self.embeddings = np.zeros([wordVectorSize, 4], dtype=np.float32)
 
-        for i ,k in enumerate(vocab):
-            self.embeddings[:,i] = np.array(k)
+        for i, k in enumerate(vocab):
+            self.embeddings[:, i] = np.array(k)
 
         # TODO: think of a better way of indexing this stuff, because currently this is a bit hacky and it does not make me
         # happy
@@ -147,9 +147,9 @@ class RNNTests(TestCase):
         out_recursive = self.recursive_model.fprop(self.tree_nodes[0][0])
         #print out_recursive.get()
 
-        self.assertAlmostEqual(out_recursive[:,0].get(), 0.52675, 4)
-        self.assertAlmostEqual(out_recursive[:,1].get(), 0.52690, 4)
-        self.assertAlmostEqual(out_recursive[:,2].get(), 0.52705, 4)
+        self.assertAlmostEqual(out_recursive[:, 0].get(), 0.52675, 4)
+        self.assertAlmostEqual(out_recursive[:, 1].get(), 0.52690, 4)
+        self.assertAlmostEqual(out_recursive[:, 2].get(), 0.52705, 4)
 
     def test_backward(self):
         '''
@@ -162,16 +162,16 @@ class RNNTests(TestCase):
 
         deltas = self.cost.get_errors(x, self.targets_mask)
 
-        self.assertAlmostEqual(deltas[:,0].get(), 0.0, 4)
-        self.assertAlmostEqual(deltas[:,1].get(), 0.0, 4)
-        self.assertAlmostEqual(deltas[:,2].get(), 0.027050, 4)
+        self.assertAlmostEqual(deltas[:, 0].get(), 0.0, 4)
+        self.assertAlmostEqual(deltas[:, 1].get(), 0.0, 4)
+        self.assertAlmostEqual(deltas[:, 2].get(), 0.027050, 4)
 
         (embeddings_delta, h_delta) = self.recursive_model.bprop(deltas)
 
-        self.assertAlmostEqual(embeddings_delta[:,0].get(), 0.00000019687, 10)
-        self.assertAlmostEqual(embeddings_delta[:,1].get(), 0.00000019687, 10)
-        self.assertAlmostEqual(embeddings_delta[:,2].get(), 0.00000037424, 10)
-        self.assertAlmostEqual(embeddings_delta[:,3].get(), 0.00000563978, 10)
+        self.assertAlmostEqual(embeddings_delta[:, 0].get(), 0.00000019687, 10)
+        self.assertAlmostEqual(embeddings_delta[:, 1].get(), 0.00000019687, 10)
+        self.assertAlmostEqual(embeddings_delta[:, 2].get(), 0.00000037424, 10)
+        self.assertAlmostEqual(embeddings_delta[:, 3].get(), 0.00000563978, 10)
 
         self.assertAlmostEqual(h_delta[0], 0.00000037424, 10)
         self.assertAlmostEqual(h_delta[1], 0.00000563978, 10)
