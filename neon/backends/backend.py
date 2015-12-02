@@ -30,7 +30,8 @@ class OpCollection(object):
     """
     zero_operand_ops = {"rand", "onehot"}
     unary_ops = {"finite", "neg", "abs", "sgn", "sqrt", "sqr", "exp", "log",
-                 "exp2", "log2", "sig", "sig2", "tanh", "tanh2", "transpose"}
+                 "exp2", "log2", "sig", "sig2", "tanh", "tanh2", "transpose",
+                 "safelog"}
     binary_ops = {"assign", "add", "sub", "mul", "div", "eq", "ne", "lt", "le",
                   "gt", "ge", "pow", "minimum", "maximum", "dot"}
     reduction_ops = {"sum", "max", "min", "argmax", "argmin"}
@@ -393,11 +394,11 @@ class Backend(object):
         self.bsz = None
         self._min_dims = 2
 
-    def iobuf(self, dim0, x=None, dtype=None, name=None, persist_values=True):
+    def iobuf(self, dim0, x=None, dtype=None, name=None, persist_values=True,
+              shared=None, parallelism=0):
         """
         Allocate input and output buffer for layer based on batch size. This
         is used because the layer does not know about the batch size.
-        TODO: support partial batches.
 
         Arguments:
             dim0 (tuple or int): I/O buffer dimension for layer (without the
@@ -407,7 +408,8 @@ class Backend(object):
                                      the buffer has already been allocated.
             dtype (data-type, optional): If present, specifies the underlying
                                          type to employ for each element.
-
+            shared (buffer, optional): If present will attempt to reuse the memory in shared to
+                                       allocate the I/O buffer
         Returns:
             Tensor: array object
         """
@@ -420,8 +422,15 @@ class Backend(object):
                 bufshape = (np.prod(dim0), self.bsz)
         else:
             bufshape = (dim0, self.bsz)
-        return self.zeros(bufshape, dtype=dtype, name=name,
-                          persist_values=persist_values)
+
+        if shared is not None:
+            if shared.shape == bufshape:
+                return shared
+            else:
+                return shared.share(bufshape)
+        else:
+            return self.zeros(bufshape, dtype=dtype, name=name,
+                              persist_values=persist_values)
 
     def rng_reset(self):
         """
@@ -481,7 +490,8 @@ class Backend(object):
         """
         pass
 
-    def empty(self, shape, dtype=None, name=None, persist_values=True):
+    def empty(self, shape, dtype=None, name=None, persist_values=True,
+              parallel=False, distributed=False):
         """
         Instantiate a new instance of this backend's Tensor class, without
         initializing element values.  This is slightly faster than
@@ -515,7 +525,8 @@ class Backend(object):
         """
         raise NotImplementedError()
 
-    def array(self, ary, dtype=None, name=None, persist_values=True):
+    def array(self, ary, dtype=None, name=None, persist_values=True,
+              parallel=False, distributed=False):
         """
         Instantiate a new instance of this backend's Tensor class, populating
         elements based on obj values.
@@ -547,7 +558,8 @@ class Backend(object):
         """
         raise NotImplementedError()
 
-    def zeros(self, shape, dtype=None, name=None, persist_values=True):
+    def zeros(self, shape, dtype=None, name=None, persist_values=True,
+              parallel=False, distributed=False):
         """
         Instantiate a new instance of this backend's Tensor class, populating
         Each element with a value of 0.
@@ -577,7 +589,8 @@ class Backend(object):
         """
         raise NotImplementedError()
 
-    def ones(self, shape, dtype=None, name=None, persist_values=True):
+    def ones(self, shape, dtype=None, name=None, persist_values=True,
+             parallel=False, distributed=False):
         """
         Instantiate a new instance of this backend's Tensor class, populating
         Each element with a value of 1.
@@ -972,6 +985,22 @@ class Backend(object):
             OpTreeNode: the resulting op-tree
         """
         return OpTreeNode.build("exp2", a, None, out=out)
+
+    def safelog(self, a, out=None):
+        """
+        Perform element-wise natural logarithm transformation on Tensor `a`,
+        storing the result in Tensor out. Both Tensor's should have identical
+        shape.  This log function has built in safety for underflow.
+
+        Arguments:
+            a (Tensor): input to be transformed.
+            out (Tensor, optional): where the result will be stored. If out is
+                                    None, only the op-tree will be returned.
+
+        Returns:
+            OpTreeNode: the resulting op-tree
+        """
+        return OpTreeNode.build("safelog", a, None, out=out)
 
     def log(self, a, out=None):
         """

@@ -19,10 +19,9 @@ scaling with the fp16 data format.
 """
 
 import numpy as np
-from neon.backends import gen_backend
 from neon.data import DataIterator, load_cifar10
 from neon.initializers import Uniform
-from neon.layers import Affine, Conv, Pooling, GeneralizedCost, Deconv
+from neon.layers import Affine, Conv, Pooling, GeneralizedCost
 from neon.models import Model
 from neon.optimizers import GradientDescentMomentum
 from neon.transforms import Misclassification, Rectlin, Softmax, CrossEntropyMulti
@@ -34,18 +33,9 @@ parser = NeonArgparser(__doc__)
 args = parser.parse_args()
 
 # hyperparameters
-batch_size = 128
 if args.datatype in [np.float16]:
     cost_scale = 10.
 num_epochs = args.epochs
-
-# setup backend
-be = gen_backend(backend=args.backend,
-                 batch_size=batch_size,
-                 rng_seed=args.rng_seed,
-                 device_id=args.device_id,
-                 default_dtype=args.datatype,
-                 stochastic_round=False)
 
 (X_train, y_train), (X_test, y_test), nclass = load_cifar10(path=args.data_dir)
 
@@ -62,13 +52,13 @@ elif args.datatype in [np.float16]:
                                       momentum_coef=0.9,
                                       stochastic_round=args.rounding)
 
-layers = []
-layers.append(Conv((5, 5, 16), init=init_uni, activation=Rectlin(), batch_norm=True))
-layers.append(Pooling((2, 2)))
-layers.append(Conv((5, 5, 32), init=init_uni, activation=Rectlin(), batch_norm=True))
-layers.append(Pooling((2, 2)))
-layers.append(Affine(nout=500, init=init_uni, activation=Rectlin(), batch_norm=True))
-layers.append(Affine(nout=10, init=init_uni, activation=Softmax()))
+layers = [Conv((5, 5, 16), init=init_uni, activation=Rectlin(), batch_norm=True),
+          Pooling((2, 2)),
+          Conv((5, 5, 32), init=init_uni, activation=Rectlin(), batch_norm=True),
+          Pooling((2, 2)),
+          Affine(nout=500, init=init_uni, activation=Rectlin(), batch_norm=True),
+          Affine(nout=10, init=init_uni, activation=Softmax())]
+
 if args.datatype in [np.float32, np.float64]:
     cost = GeneralizedCost(costfunc=CrossEntropyMulti())
 elif args.datatype in [np.float16]:
@@ -77,9 +67,7 @@ elif args.datatype in [np.float16]:
 mlp = Model(layers=layers)
 
 # configure callbacks
-callbacks = Callbacks(mlp, train, output_file=args.output_file,
-                      valid_set=test, valid_freq=args.validation_freq,
-                      progress_bar=args.progress_bar)
+callbacks = Callbacks(mlp, train, eval_set=test, **args.callback_args)
 
 mlp.fit(train, optimizer=opt_gdm, num_epochs=num_epochs, cost=cost, callbacks=callbacks)
 

@@ -31,26 +31,20 @@ from neon.models import Model
 from neon.optimizers import RMSProp
 from neon.transforms import Tanh, Softmax, CrossEntropyMulti
 from neon.callbacks.callbacks import Callbacks
-from neon.util.argparser import NeonArgparser
+from neon.util.argparser import NeonArgparser, extract_valid_args
 
 # parse the command line arguments
 parser = NeonArgparser(__doc__)
-args = parser.parse_args()
-
-batch_size = 50
-num_epochs = args.epochs
+args = parser.parse_args(gen_be=False)
 
 # these hyperparameters are from the paper
+args.batch_size = 50
 time_steps = 150
 hidden_size = 500
-clip_gradients = False
+gradient_clip_value = None
 
 # setup backend
-be = gen_backend(backend=args.backend,
-                 batch_size=batch_size,
-                 rng_seed=args.rng_seed,
-                 device_id=args.device_id,
-                 default_dtype=args.datatype)
+be = gen_backend(**extract_valid_args(args, gen_backend))
 
 # download penn treebank
 train_path = load_text('ptb-train', path=args.data_dir)
@@ -64,25 +58,17 @@ valid_set = Text(time_steps, valid_path, vocab=train_set.vocab)
 init = Uniform(low=-0.08, high=0.08)
 
 # model initialization
-layers = [
-    Recurrent(hidden_size, init, Tanh()),
-    Affine(len(train_set.vocab), init, bias=init, activation=Softmax())
-]
+layers = [Recurrent(hidden_size, init, activation=Tanh()),
+          Affine(len(train_set.vocab), init, bias=init, activation=Softmax())]
 
 cost = GeneralizedCost(costfunc=CrossEntropyMulti(usebits=True))
 
 model = Model(layers=layers)
 
-optimizer = RMSProp(clip_gradients=clip_gradients, stochastic_round=args.rounding)
+optimizer = RMSProp(gradient_clip_value=gradient_clip_value, stochastic_round=args.rounding)
 
 # configure callbacks
-callbacks = Callbacks(model, train_set, output_file=args.output_file,
-                      valid_set=valid_set, valid_freq=args.validation_freq,
-                      progress_bar=args.progress_bar)
+callbacks = Callbacks(model, train_set, eval_set=valid_set, **args.callback_args)
 
 # train model
-model.fit(train_set,
-          optimizer=optimizer,
-          num_epochs=num_epochs,
-          cost=cost,
-          callbacks=callbacks)
+model.fit(train_set, optimizer=optimizer, num_epochs=args.epochs, cost=cost, callbacks=callbacks)

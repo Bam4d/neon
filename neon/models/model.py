@@ -12,12 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ----------------------------------------------------------------------------
+from collections import OrderedDict
+import logging
 
 from neon import NervanaObject
 from neon.transforms import CrossEntropyBinary, Logistic
 from neon.util.persist import load_obj
-from neon.layers import Merge, Activation
+from neon.layers import Sequential, Activation, Tree
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class Model(NervanaObject):
@@ -27,36 +31,25 @@ class Model(NervanaObject):
     Additional functionality can be added to fit through callback functions.
 
     Arguments:
-        layers (list): List of layers that compose a model.
+        layers: layer container, or a list of layers (that will be containerized)
         name (str): Model name.  Defaults to "model"
         optimizer (Optimizer): Optimizer object which defines the learning rule
                                for updating model parameters (ie DescentMomentum, AdaDelta)
     """
 
-    def __init__(self, layers=[], name="model", optimizer=None):
+    def __init__(self, layers, name="model", optimizer=None):
         super(Model, self).__init__(name)
         self.optimizer = optimizer
-        self.params = None
-        self.states = None
+        self.params = None  # should be able to remove
+        self.states = None  # should be able to remove
         self.epoch_index = 0
         self.finished = False
         self.initialized = False
+        self.cost = None
 
-        self.layers = []
-        self.layers_to_optimize = []
-
-        for layer in layers:
-            if isinstance(layer, list):
-                self.layers.extend(layer)
-            else:
-                self.layers.append(layer)
-
-        for layer in self.layers:
-            if layer.has_params:
-                self.layers_to_optimize.append(layer)
-
-            elif isinstance(layer, Merge):
-                self.layers_to_optimize += layer.layers_to_optimize
+        # Wrap the list of layers in a Sequential container if a raw list of layers
+        self.layers = layers if type(layers) in (Sequential, Tree) else Sequential(layers)
+        self.layers_to_optimize = self.layers.layers_to_optimize
 
     def set_shortcut(self):
         # infer whether bprop shortcut can be used on final activation
@@ -72,49 +65,27 @@ class Model(NervanaObject):
             # is thrown leave transform.shortcut as is (do nothing)
             pass
 
-    def load_weights(self, weight_path):
-        """
-        Loads the layer weights saved in weight_path from serialize().
-
-        Arguments:
-            weight_path (str): File containing serialized python dict with layer
-                               weights and states.
-        """
-        pdict = load_obj(weight_path)
-        self.epoch_index = pdict['epoch_index']
-
-        param_layers = [l for l in self.layers_to_optimize]
-        param_dict_list = pdict['layer_params_states']
-        for l, ps in zip(param_layers, param_dict_list):
-            l.set_params(ps['params'])
-            if 'states' in ps:
-                l.set_states(ps['states'])
-
     def initialize(self, dataset, cost=None):
         if self.initialized:
             return
         # Propagate shapes through the layers to configure
         prev_input = dataset
-        for l in self.layers:
-            prev_input = l.configure(prev_input)
+        prev_input = self.layers.configure(prev_input)
 
         if cost is not None:
             cost.initialize(prev_input)
 
         # Now allocate space
-        for l in self.layers:
-            l.allocate()
+        self.layers.allocate()
+        self.layers.allocate_deltas()
         self.initialized = True
 
-    def print_layers(self):
+    def __str__(self):
         """
-        Print network layers
+        String representation of model's layers
         """
-        config_string = "Network Layers:"
-        for layer in self.layers:
-            config_string = config_string + "\n\t" + str(layer)
-        config_string = config_string + "\n"
-        print config_string
+        config_string = "Network Layers:\n" + self.layers.nested_str()
+        return config_string
 
     def fit(self, dataset, cost, optimizer, num_epochs, callbacks):
         """
@@ -132,11 +103,11 @@ class Model(NervanaObject):
                 on the output of the last layer and the input labels
             optimizer (Optimizer): Defines the learning rule for updating the model parameters
             num_epochs: Number of times to iterate over the dataset.
+            callbacks (Callbacks): Defines callbacks to run at the end of each mini-batch / epoch.
         """
         self.cost = cost
         self.initialize(dataset, cost)
-        self.print_layers()
-        self.set_shortcut()  # infer if bprop shortcut can be used
+        # self.set_shortcut()  # infer if bprop shortcut can be used
         self.optimizer = optimizer
         self.total_cost = self.be.empty((1, 1))
 
@@ -165,7 +136,6 @@ class Model(NervanaObject):
         self.total_cost[:] = 0
         # iterate through minibatches of the dataset
         for mb_idx, (x, t) in enumerate(dataset):
-
             callbacks.on_minibatch_begin(epoch, mb_idx)
 
             x = self.fprop(x)
@@ -175,8 +145,8 @@ class Model(NervanaObject):
             # deltas back propagate through layers
             # for every layer in reverse except the 0th one
             delta = self.cost.get_errors(x, t)
-            self.bprop(delta)
 
+            self.bprop(delta)
             self.optimizer.optimize(self.layers_to_optimize, epoch=epoch)
 
             callbacks.on_minibatch_end(epoch, mb_idx)
@@ -198,22 +168,16 @@ class Model(NervanaObject):
         Returns:
             Tensor: the output of the final layer in the model
         """
-        for l in self.layers:
-            x = l.fprop(x, inference)
-        return x
+        return self.layers.fprop(x, inference)
 
-    def bprop(self, delta, do_acts=True):
+    def bprop(self, delta):
         """
         Back propagates the error of a minibatch through the model.
 
         Arguments:
             delta (Tensor): Derivative of cost with respect to the last layer's output
-            do_acts (bool): Whether to compute the output deltas of layer. The first layer
-                does not need to compute output deltas and so do_acts is set to False.
         """
-        for l in reversed(self.layers[1:]):
-            delta = l.bprop(delta)
-        return self.layers[0].bprop(delta, do_acts=False)
+        return self.layers.bprop(delta)
 
     def eval(self, dataset, metric):
         """
@@ -232,8 +196,7 @@ class Model(NervanaObject):
 
             # This logic is for handling partial batch sizes at the end of the dataset
             bsz = min(dataset.ndata - nprocessed, self.be.bsz)
-            metric(x, t)
-            running_error += metric.outputs.get()[:, :bsz].sum(axis=1)
+            running_error += metric(x, t, calcrange=slice(0, bsz)) * bsz
             nprocessed += bsz
         running_error /= nprocessed
         return running_error
@@ -251,13 +214,15 @@ class Model(NervanaObject):
         self.initialize(dataset)
         dataset.reset()  # Move "pointer" back to beginning of dataset
         n = dataset.nbatches
-        x = self.layers[-1].outputs
-        (dim0, dim1) = x.shape
-        Ypred = np.empty((n * dim1, dim0), dtype=x.dtype)
-        nsteps = dim1 / self.be.bsz
-
+        x = self.layers.layers[-1].outputs
+        assert not isinstance(x, list), "Can not get_outputs with Branch terminal"
+        Ypred = None
         for idx, (x, t) in enumerate(dataset):
             x = self.fprop(x, inference=True)
+            if Ypred is None:
+                (dim0, dim1) = x.shape
+                Ypred = np.empty((n * dim1, dim0), dtype=x.dtype)
+                nsteps = dim1 / self.be.bsz
             cur_batch = slice(idx * dim1, (idx + 1) * dim1)
             Ypred[cur_batch] = x.get().T
 
@@ -284,12 +249,32 @@ class Model(NervanaObject):
             pdict['optimizer'] = self.optimizer.get_description()
         return pdict
 
+    def load_weights(self, weight_path):
+        """
+        Loads the layer weights saved in weight_path from serialize().
+
+        Arguments:
+            weight_path (str): File containing serialized python dict with layer
+                               weights and states.
+        """
+        pdict = load_obj(weight_path)
+
+        self.epoch_index = pdict['epoch_index']
+
+        param_layers = [l for l in self.layers_to_optimize]
+        param_dict_list = pdict['layer_params_states']
+        for l, ps in zip(param_layers, param_dict_list):
+            l.set_params(ps['params'])
+            if 'states' in ps:
+                l.set_states(ps['states'])
+
+        logger.info('Model weights loaded from %s', weight_path)
+
     # serialize tells how to write out the parameters we've learned so
     # far and associate them with layers. it can ignore layers with no
     # learned parameters. the model stores states to pass to the
     # optimizers.  if we're saving the model out for inference, we
     # don't need to remember states.
-
     def serialize(self, keep_states=True):
         """
         Creates a dictionary storing the layer parameters and epochs complete.
@@ -307,3 +292,89 @@ class Model(NervanaObject):
         # start training again on the next epoch
         pdict['epoch_index'] = self.epoch_index + 1
         return pdict
+
+    def benchmark(self, dataset, cost, optimizer, niterations=20, nskip=2):
+        """
+        Measure runtime for computing fprop and bprop seperately, as well as
+        full minibatch run times.
+
+        Arguments:
+              dataset (iterable): Dataset iterator to perform fit on
+
+              cost (Cost): Defines the function which the model is minimizing based
+                            on the output of the last layer and the input labels
+
+             niterations (optional, int): Number of minibatches to average over
+
+             nskip (optional, int): number of iterations at the beginning to skip
+                                    when calculating the runtime statistics
+
+        Returns:
+            dictionary with fprop, bprop run times
+        """
+        # initialize model
+        self.cost = cost
+        self.initialize(dataset, cost)
+        self.optimizer = optimizer
+        self.total_cost = self.be.empty((1, 1))
+        self.total_cost[:] = 0
+
+        # iterate through minibatches of the dataset
+        times = OrderedDict()
+        for ky in ['fprop', 'bprop', 'update', 'iteration']:
+            times[ky] = np.full(niterations + nskip, -1.0)
+        count = 0
+
+        mb_st = self.be.init_mark()
+        mb_end = self.be.init_mark()
+        evt_st = self.be.init_mark()
+        evt_end = self.be.init_mark()
+
+        while count < niterations + nskip:
+            dataset.reset()
+            for mb_idx, (x, t) in enumerate(dataset):
+                self.be.record_mark(mb_st)
+
+                x = self.fprop(x)
+                self.total_cost[:] = self.total_cost + self.cost.get_cost(x, t)
+
+                self.be.record_mark(evt_end)
+
+                times['fprop'][count] = self.be.get_time(mb_st, evt_end)
+
+                self.be.record_mark(evt_st)  # mark bprop start
+                delta = self.cost.get_errors(x, t)
+
+                self.bprop(delta)
+
+                self.be.record_mark(evt_end)  # mark end of bprop
+                times['bprop'][count] = self.be.get_time(evt_st, evt_end)
+
+                self.be.record_mark(evt_st)
+                self.optimizer.optimize(self.layers_to_optimize, epoch=0)
+                self.be.record_mark(evt_end)  # end of update
+
+                times['update'][count] = self.be.get_time(evt_st, evt_end)
+
+                self.be.record_mark(mb_end)
+                times['iteration'][count] = self.be.get_time(mb_st, mb_end)
+
+                count += 1
+                if count >= niterations + nskip:
+                    break
+
+        # print results
+        header = ['Func', 'Mean', 'Median', 'Min', 'Max', 'Units']
+
+        fmt_titles = '| {:^11} '*len(header) + '|'
+        fmt_nums = '| {func:<11} ' + '|  {:<10.5g} '*(len(header)-2) + '| {units:^11} |'
+
+        head_str = fmt_titles.format(*header)
+        sep = '-'*len(head_str)
+        head_str = sep + '\n' + head_str + '\n' + sep
+        print(head_str)
+        for ky in times:
+            timesu = np.array(times[ky][nskip:])  # in ms
+            stats = [np.mean(timesu), np.median(timesu), np.min(timesu), np.max(timesu)]
+            print(fmt_nums.format(*stats, units='msec', func=ky))
+        print(sep)

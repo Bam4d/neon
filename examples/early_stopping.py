@@ -20,10 +20,9 @@ or when num_epochs has been reached, whichever is first.
 """
 import os
 
-from neon.backends import gen_backend
 from neon.data import DataIterator, load_mnist
 from neon.initializers import Gaussian
-from neon.layers import GeneralizedCost, Affine, BatchNorm
+from neon.layers import GeneralizedCost, Affine
 from neon.models import Model
 from neon.optimizers import GradientDescentMomentum
 from neon.transforms import Rectlin, Logistic, CrossEntropyBinary
@@ -34,21 +33,9 @@ from neon.util.argparser import NeonArgparser
 parser = NeonArgparser(__doc__)
 args = parser.parse_args()
 
-# hyperparameters
-batch_size = 128
-num_epochs = 10
-
-# setup backend
-# epsilon should be a default
-be = gen_backend(backend=args.backend,
-                 batch_size=batch_size,
-                 rng_seed=args.rng_seed,
-                 device_id=args.device_id,
-                 default_dtype=args.datatype)
-
 (X_train, y_train), (X_test, y_test), nclass = load_mnist(path=args.data_dir)
-train_set = DataIterator(X_train, y_train, nclass=nclass)
-valid_set = DataIterator(X_test, y_test, nclass=nclass)
+train_set = DataIterator(X_train, y_train, nclass=nclass, lshape=(1, 28, 28))
+valid_set = DataIterator(X_test, y_test, nclass=nclass, lshape=(1, 28, 28))
 
 # weight initialization
 init_norm = Gaussian(loc=0.0, scale=0.01)
@@ -69,7 +56,7 @@ mlp = Model(layers=layers)
 
 
 # Stop if validation error ever increases from epoch to epoch
-def stopFunc(s, v):
+def stop_func(s, v):
     if s is None:
         return (v, False)
 
@@ -79,16 +66,14 @@ def stopFunc(s, v):
 optimizer = GradientDescentMomentum(learning_rate=0.1, momentum_coef=0.9)
 
 # configure callbacks
-if args.validation_freq is None:
-    args.validation_freq = 1
+if args.callback_args['eval_freq'] is None:
+    args.callback_args['eval_freq'] = 1
 
-callbacks = Callbacks(mlp, train_set, output_file=args.output_file,
-                      valid_set=valid_set, valid_freq=args.validation_freq,
-                      progress_bar=args.progress_bar)
-callbacks.add_early_stop_callback(stopFunc)
+callbacks = Callbacks(mlp, train_set, eval_set=valid_set, **args.callback_args)
+callbacks.add_early_stop_callback(stop_func)
 callbacks.add_save_best_state_callback(os.path.join(args.data_dir, "early_stop-best_state.pkl"))
 mlp.fit(train_set,
         optimizer=optimizer,
-        num_epochs=num_epochs,
+        num_epochs=args.epochs,
         cost=cost,
         callbacks=callbacks)

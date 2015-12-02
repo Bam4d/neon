@@ -43,9 +43,10 @@ visualization dependencies you'll need to ``touch vis_requirements.txt`` prior
 to the ``make -e VIS=true`` call to ensure virtualenv python dependencies get
 triggered.
 
+Cost visualization
+""""""""""""""""""
 Visualization of training and validation set cost on an epoch or minibatch
-axis is currently supported. Deconv, direct and histogram visualizations of
-layer parameters are planned for an upcoming release.
+axis is currently supported.
 
 The following example shows dumping training cost data from ``neon`` and
 visualizing it via ``nvis``:
@@ -53,15 +54,20 @@ visualizing it via ``nvis``:
 .. code-block:: bash
 
     neon examples/mnist_mlp.yaml -o data.h5
-    nvis -i data.h5 -o data.html
+    nvis -i data.h5 -o .
 
 If validation cost is computed in ``neon``, it will also be saved and
 visualized by ``nvis``:
 
 .. code-block:: bash
 
-    neon examples/mnist_mlp.yaml -o data.h5 --validation_freq 1
-    nvis -i data.h5 -o data.html
+    neon examples/mnist_mlp.yaml -o data.h5 --eval_freq 1
+    nvis -i data.h5 -o .
+
+Here's an example of the visualized output:
+
+.. raw:: html
+   :file: assets/cost-hist.html
 
 Script examples not directly using the ``neon`` command can still dump
 visualization data:
@@ -70,4 +76,39 @@ visualization data:
 .. code-block:: bash
 
     examples/cifar10_allcnn.py -o data.h5
-    nvis -i data.h5 -o data.html
+    nvis -i data.h5 -o .
+
+
+Layer deconvolution visualization
+"""""""""""""""""""""""""""""""""
+Guided Backprop based visualization of convolutional layer activations is also
+supported via the :py:class:`neon.callbacks.callbacks.DeconvCallback` class or 
+:py:meth:`neon.callbacks.callbacks.Callbacks.add_deconv_callback` function.
+
+.. code-block:: bash
+
+    examples/imagenet_allcnn.py -o data.h5 --deconv
+    nvis -i data.h5 -o .
+
+Here's an example of the output.  Click `here (deconv) <http://neon.nervanasys.com/nvis/deconv.html>`_ to see the full visualization (57Mb, may take some time to load).
+
+.. figure:: assets/deconv.png
+   :scale: 100%
+   :alt: deconv visualization
+
+   Guided backprop layer visualizations
+
+
+Layer histogram visualization
+"""""""""""""""""""""""""""""
+Per layer value histograms are also available via the 
+:py:class:`neon.callbacks.callbacks.HistCallback` class or
+:py:meth:`neon.callbacks.callbacks.Callbacks.add_hist_callback` function.
+
+Here's an example of the output.  Click `here (histograms) <http://neon.nervanasys.com/nvis/alexnet_histograms.html>`_ to see the full visualization (60Mb, may take some time to load).
+
+.. figure:: assets/histograms.png
+   :scale: 100%
+   :alt: layer histograms
+
+   Layer histograms

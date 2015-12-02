@@ -24,10 +24,12 @@ import numpy as np
 
 from neon import NervanaObject
 from neon.backends.autodiff import Autodiff
+from neon.backends.util.check_gpu import get_device_count
 
 
-def gen_backend(backend='cpu', rng_seed=None, default_dtype=np.float32,
-                batch_size=0, stochastic_round=False, device_id=0):
+def gen_backend(backend='cpu', rng_seed=None, datatype=np.float32,
+                batch_size=0, stochastic_round=False, device_id=0,
+                max_devices=get_device_count()):
     """
     Construct and return a backend instance of the appropriate type based on
     the arguments given. With no parameters, a single CPU core, float32
@@ -35,52 +37,46 @@ def gen_backend(backend='cpu', rng_seed=None, default_dtype=np.float32,
 
     Arguments:
         backend (string, optional): 'cpu' or 'gpu'.
-        rng_seed (numeric, optional): Set this to a numeric value which can be
-                                      used to seed the random number generator
-                                      of the instantiated backend.  Defaults to
-                                      None, which doesn't explicitly seed (so
-                                      each run will be different)
-        default_dtype (dtype): Default tensor data type. CPU backend supports
-                               np.float64, np.float32 and np.float16; GPU
-                               backend supports np.float32 and np.float16.
+        rng_seed (numeric, optional): Set this to a numeric value which can be used to seed the
+                                      random number generator of the instantiated backend.
+                                      Defaults to None, which doesn't explicitly seed (so each run
+                                      will be different)
+        dataype (dtype): Default tensor data type. CPU backend supports np.float64, np.float32 and
+                         np.float16; GPU backend supports np.float32 and np.float16.
         batch_size (int): Set the size the data batches.
-        stochastic_round (int/bool, optional): Set this to True or an integer
-                                               to implent stochastic rounding.
-                                               If this is False rounding will
-                                               be to nearest.
-                                               If True will perform stochastic
-                                               rounding using default bit width.
-                                               If set to an integer will round
-                                               to that number of bits.
+        stochastic_round (int/bool, optional): Set this to True or an integer to implent
+                                               stochastic rounding. If this is False rounding will
+                                               be to nearest. If True will perform stochastic
+                                               rounding using default bit width. If set to an
+                                               integer will round to that number of bits.
                                                Only affects the gpu backend.
-        device_id (numeric, optional): Set this to a numeric value which can be
-                                       used to select which device to run the
-                                       process on
+        device_id (numeric, optional): Set this to a numeric value which can be used to select
+                                       device on which to run the process
+        max_devices (int, optional): For use with multi-GPU backend only.
+                                      Controls the maximum number of GPUs to run
+                                      on.
 
     Returns:
         Backend: newly constructed backend instance of the specifed type.
 
     Notes:
-        * Attempts to construct a GPU instance without a CUDA capable card or
-          without nervanagpu package installed will cause the
-          program to display an error message and exit.
+        * Attempts to construct a GPU instance without a CUDA capable card or without nervanagpu
+          package installed will cause the program to display an error message and exit.
     """
     logger = logging.getLogger(__name__)
 
     if NervanaObject.be is not None:
-        # backend was already generated
-        # clean it up first
+        # backend was already generated clean it up first
         cleanup_backend()
     else:
-        # at exit from python force cleanup of backend
-        # only register this function once, will use
+        # at exit from python force cleanup of backend only register this function once, will use
         # NervanaObject.be instead of a global
         atexit.register(cleanup_backend)
 
     if backend == 'cpu' or backend is None:
         from neon.backends.nervanacpu import NervanaCPU
-        be = NervanaCPU(rng_seed=rng_seed, default_dtype=default_dtype)
-    elif backend == 'gpu':
+        be = NervanaCPU(rng_seed=rng_seed, default_dtype=datatype)
+    elif backend == 'gpu' or backend == 'mgpu':
         gpuflag = False
         # check nvcc
         from neon.backends.util import check_gpu
@@ -88,15 +84,26 @@ def gen_backend(backend='cpu', rng_seed=None, default_dtype=np.float32,
         if gpuflag is False:
             raise RuntimeError("Device " + str(device_id) + " does not have CUDA compute " +
                                "capability 5.0 or greater")
-        from neon.backends.nervanagpu import NervanaGPU
-        # init gpu
-        be = NervanaGPU(rng_seed=rng_seed, default_dtype=default_dtype,
-                        stochastic_round=stochastic_round, device_id=device_id)
-    elif backend == 'mgpu':
-        raise NotImplementedError("mgpu will be ready soon")
+        if backend == 'gpu':
+            from neon.backends.nervanagpu import NervanaGPU
+            # init gpu
+            be = NervanaGPU(rng_seed=rng_seed, default_dtype=datatype,
+                            stochastic_round=stochastic_round, device_id=device_id)
+        else:
+            try:
+                from mgpu.nervanamgpu import NervanaMGPU
+                # init multiple GPU
+                be = NervanaMGPU(rng_seed=rng_seed,
+                                 default_dtype=datatype,
+                                 stochastic_round=stochastic_round,
+                                 num_devices=max_devices)
+            except ImportError:
+                logger.error("Multi-GPU support is a premium feature "
+                             "available exclusively through the Nervana cloud."
+                             " Please contact info@nervanasys.com for details.")
+                raise
     else:
-        raise ValueError("backend must be one of "
-                         "('cpu', 'gpu', 'mgpu')")
+        raise ValueError("backend must be one of ('cpu', 'gpu', 'mgpu')")
 
     logger.info("Backend: {}, RNG seed: {}".format(backend, rng_seed))
 
@@ -112,10 +119,16 @@ def cleanup_backend():
     from neon.backends.nervanacpu import NervanaCPU
     if type(be) is not NervanaCPU:
         from neon.backends.nervanagpu import NervanaGPU
-        assert type(be) is NervanaGPU
         try:
-            be.ctx.pop()
-            be.ctx.detach()
+            if type(be) is NervanaGPU:
+                be.ctx.pop()
+                be.ctx.detach()
+            else:
+                from mgpu.nervanamgpu import NervanaMGPU
+                assert type(be) is NervanaMGPU
+                for ctx in be.ctxs:
+                    ctx.pop()
+                    ctx.detach()
         except:
             pass
     del(be)

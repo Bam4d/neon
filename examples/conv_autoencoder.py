@@ -20,7 +20,6 @@ Convolutional autoencoder example network for MNIST data set
 
 import numpy as np
 
-from neon.backends import gen_backend
 from neon.data import DataIterator, load_mnist
 from neon.initializers import Uniform
 from neon.layers import Conv, Pooling, GeneralizedCost, Deconv
@@ -34,16 +33,6 @@ from neon.util.argparser import NeonArgparser
 parser = NeonArgparser(__doc__)
 args = parser.parse_args()
 
-batch_size = 128
-num_epochs = args.epochs
-
-# setup backend
-be = gen_backend(backend=args.backend,
-                 batch_size=batch_size,
-                 rng_seed=args.rng_seed,
-                 device_id=args.device_id,
-                 default_dtype=args.datatype)
-
 # Load dataset
 (X_train, y_train), (X_test, y_test), nclass = load_mnist(path=args.data_dir)
 
@@ -55,14 +44,13 @@ init_uni = Uniform(low=-0.1, high=0.1)
 opt_gdm = GradientDescentMomentum(learning_rate=0.001, momentum_coef=0.9)
 
 # Define the layers
-layers = []
-layers.append(Conv((4, 4, 8), init=init_uni, activation=Rectlin()))
-layers.append(Pooling(2))
-layers.append(Conv((4, 4, 32), init=init_uni, activation=Rectlin()))
-layers.append(Pooling(2))
-layers.append(Deconv(fshape=(4, 4, 8), init=init_uni))
-layers.append(Deconv(fshape=(2, 2, 8), init=init_uni, strides=2))
-layers.append(Deconv(fshape=(2, 2, 1), init=init_uni, strides=2))
+layers = [Conv((4, 4, 8), init=init_uni, activation=Rectlin()),
+          Pooling(2),
+          Conv((4, 4, 32), init=init_uni, activation=Rectlin()),
+          Pooling(2),
+          Deconv(fshape=(3, 3, 8), init=init_uni, strides=2, padding=1),
+          Deconv(fshape=(3, 3, 8), init=init_uni, strides=2, padding=1),
+          Deconv(fshape=(4, 4, 1), init=init_uni, strides=2, padding=0)]
 
 # Define the cost
 cost = GeneralizedCost(costfunc=SumSquared())
@@ -71,12 +59,11 @@ mlp = Model(layers=layers)
 # Fit the model
 
 # configure callbacks
-callbacks = Callbacks(mlp, train, output_file=args.output_file,
-                      progress_bar=args.progress_bar)
+callbacks = Callbacks(mlp, train, **args.callback_args)
 
-mlp.fit(train, optimizer=opt_gdm, num_epochs=1, cost=cost, callbacks=callbacks)
+mlp.fit(train, optimizer=opt_gdm, num_epochs=args.epochs, cost=cost, callbacks=callbacks)
 
-print mlp.layers[-1]
+print mlp.layers.layers[-1]
 # Plot the reconstructed digits
 try:
     from matplotlib import pyplot, cm
@@ -86,7 +73,7 @@ try:
     test = np.zeros((28*nrows, 28*ncols))
     idxs = [(row, col) for row in range(nrows) for col in range(ncols)]
     for row, col in idxs:
-        im = mlp.layers[-1].outputs.get()[:, fi].reshape((28, 28))
+        im = mlp.layers.layers[-1].outputs.get()[:, fi].reshape((28, 28))
         test[28*row:28*(row+1):, 28*col:28*(col+1)] = im
         fi = fi + 1
     pyplot.matshow(test, cmap=cm.gray)

@@ -92,3 +92,39 @@ class GlorotUniform(Initializer):
     def fill(self, param):
         k = np.sqrt(6.0 / (param.shape[0] + param.shape[1]))
         param[:] = self.be.rng.uniform(-k, k, param.shape)
+
+
+class Xavier(Initializer):
+    """
+    Alternate form of Glorot where only input nodes are used for scaling range.
+
+    Args:
+        local   (bool, optional): Whether the layer type is local (Convolutional) or not.
+                                  default is True.
+    """
+
+    def __init__(self, local=True, name="xavier"):
+        super(Xavier, self).__init__(name=name)
+        self.local = local
+
+    def fill(self, param):
+        fan_in = param.shape[0 if self.local else 1]
+        scale = np.sqrt(3./fan_in)
+        param[:] = self.be.rng.uniform(-scale, scale, param.shape)
+
+
+class Orthonormal(Initializer):
+    """
+    Implementation taken from Lasagne. Reference: Saxe et al., http://arxiv.org/abs/1312.6120
+    """
+
+    def __init__(self, scale=1.1, name="orthonormal"):
+        super(Orthonormal, self).__init__(name=name)
+        self.scale = scale
+
+    def fill(self, param):
+        a = np.random.normal(0.0, 1.0, param.shape)
+        u, _, v = np.linalg.svd(a, full_matrices=False)
+        # pick the one with the correct shape
+        q = u if u.shape == param.shape else v
+        param[:] = self.scale * q

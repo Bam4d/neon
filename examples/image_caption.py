@@ -28,28 +28,23 @@ https://github.com/karpathy/neuraltalk
 from neon.backends import gen_backend
 from neon.data import load_flickr8k, ImageCaption, ImageCaptionTest
 from neon.initializers import Uniform, Constant
-from neon.layers import GeneralizedCostMask, LSTM, MergeConcatSequence, Affine, Dropout
+from neon.layers import GeneralizedCostMask, LSTM, Affine, Dropout, Sequential, MergeMultistream
 from neon.models import Model
 from neon.optimizers import RMSProp
 from neon.transforms import Logistic, Tanh, Softmax, CrossEntropyMulti
 from neon.callbacks.callbacks import Callbacks
-from neon.util.argparser import NeonArgparser
+from neon.util.argparser import NeonArgparser, extract_valid_args
 
 # parse the command line arguments
 parser = NeonArgparser(__doc__)
-args = parser.parse_args()
+args = parser.parse_args(gen_be=False)
 
 # hyperparameters
-batch_size = 128
 hidden_size = 512
 num_epochs = args.epochs
 
 # setup backend
-be = gen_backend(backend=args.backend,
-                 batch_size=batch_size,
-                 rng_seed=args.rng_seed,
-                 device_id=args.device_id,
-                 default_dtype=args.datatype)
+be = gen_backend(**extract_valid_args(args, gen_backend))
 
 # download dataset
 data_path = load_flickr8k(path=args.data_dir)  # Other setnames are flickr30k and coco
@@ -62,27 +57,31 @@ init = Uniform(low=-0.08, high=0.08)
 init2 = Constant(val=train_set.be.array(train_set.bias_init))
 
 # model initialization
-image_path = Affine(hidden_size, init, bias=Constant(val=0.0))
-sent_path = Affine(hidden_size, init, linear_name='sent')
+image_path = Sequential([Affine(hidden_size, init, bias=Constant(val=0.0))])
+sent_path = Sequential([Affine(hidden_size, init, linear_name='sent')])
+
 layers = [
-    MergeConcatSequence([image_path, sent_path]),
+    MergeMultistream(layers=[image_path, sent_path], merge="recurrent"),
     Dropout(keep=0.5),
     LSTM(hidden_size, init, activation=Logistic(), gate_activation=Tanh(), reset_cells=True),
     Affine(train_set.vocab_size, init, bias=init2, activation=Softmax())
 ]
 
 cost = GeneralizedCostMask(costfunc=CrossEntropyMulti(usebits=True))
+
+# configure callbacks
 checkpoint_model_path = "~/image_caption2.pickle"
-checkpoint_schedule = range(num_epochs)
+if args.callback_args['save_path'] is None:
+    args.callback_args['save_path'] = checkpoint_model_path
+
+if args.callback_args['serialize'] is None:
+    args.callback_args['serialize'] = 1
 
 model = Model(layers=layers)
 
-callbacks = Callbacks(model, train_set, output_file=args.output_file,
-                      progress_bar=args.progress_bar)
-callbacks.add_serialize_callback(checkpoint_schedule, checkpoint_model_path)
+callbacks = Callbacks(model, train_set, **args.callback_args)
 
-opt = RMSProp(decay_rate=0.997, learning_rate=0.0005, epsilon=1e-8, clip_gradients=True,
-              gradient_limit=1.0)
+opt = RMSProp(decay_rate=0.997, learning_rate=0.0005, epsilon=1e-8, gradient_clip_value=1)
 
 # train model
 model.fit(train_set, optimizer=opt, num_epochs=num_epochs, cost=cost, callbacks=callbacks)

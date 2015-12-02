@@ -27,11 +27,29 @@ import logging
 from logging.handlers import RotatingFileHandler
 import numpy as np
 import os
+import inspect
 
 from neon import __version__ as neon_version
-from neon.backends.util.check_gpu import get_compute_capability
+from neon.backends import gen_backend
+from neon.backends.util.check_gpu import get_compute_capability, get_device_count
+from neon.callbacks.callbacks import Callbacks
 
 logger = logging.getLogger(__name__)
+
+
+def extract_valid_args(args, func, startidx=0):
+    """
+    Given a namespace of argparser args, extract those applicable to func.
+
+    Arguments:
+        args (Namespace): a namespace of args from argparse
+        func (Function): a function to inspect, to determine valid args
+
+    Returns:
+        dict of (arg, value) pairs from args that are valid for func
+    """
+    func_args = inspect.getargspec(func).args[startidx:]
+    return dict((k, v) for k, v in vars(args).items() if k in func_args)
 
 
 class NeonArgparser(configargparse.ArgumentParser):
@@ -70,7 +88,7 @@ class NeonArgparser(configargparse.ArgumentParser):
         self.add_argument('-c', '--config', is_config_file=True,
                           help='Read values for these arguments from the '
                                'configuration file specified here first.')
-        self.add_argument('-v', '--verbose', action='count', default=0,
+        self.add_argument('-v', '--verbose', action='count', default=1,
                           help="verbosity level.  Add multiple v's to "
                                "further increase verbosity")
         # we store the negation of no_progress_bar in args.progress_bar during
@@ -101,18 +119,23 @@ class NeonArgparser(configargparse.ArgumentParser):
                             help='hdf5 data file for metrics computed during '
                                  'the run, optional.  Can be used by nvis for '
                                  'visualization.')
-        rt_grp.add_argument('-val', '--validation_freq', type=int, default=None,
-                            help='frequency (in epochs) to test the validation set.')
+        rt_grp.add_argument('-eval', '--eval_freq', type=int, default=None,
+                            help='frequency (in epochs) to test the eval set.')
         rt_grp.add_argument('-H', '--history', type=int, default=1,
                             help='number of checkpoint files to retain')
 
         be_grp = self.add_argument_group('backend')
-        be_grp.add_argument('-b', '--backend', choices=['cpu', 'gpu'],
+        be_grp.add_argument('-b', '--backend', choices=['cpu', 'gpu', 'mgpu'],
                             default='gpu' if get_compute_capability() >= 5.0
                                     else 'cpu',
-                            help='backend type')
+                            help='backend type. Multi-GPU support is a premium '
+                                 'feature available exclusively through the '
+                                 'Nervana cloud. Please contact '
+                                 'info@nervanasys.com for details.')
         be_grp.add_argument('-i', '--device_id', type=int, default=0,
                             help='gpu device id (only used with GPU backend)')
+        be_grp.add_argument('-m', '--max_devices', type=int, default=get_device_count(),
+                            help='max number of GPUs (only used with mgpu backend')
 
         be_grp.add_argument('-r', '--rng_seed', type=int,
                             default=None, metavar='SEED',
@@ -126,9 +149,12 @@ class NeonArgparser(configargparse.ArgumentParser):
                             help='use stochastic rounding [will round to BITS number '
                                  'of bits if specified]')
         be_grp.add_argument('-d', '--datatype', choices=['f16', 'f32', 'f64'],
-                            default='f32', metavar='default dtype',
+                            default='f32', metavar='default datatype',
                             help='default floating point '
                             'precision for backend [f64 for cpu only]')
+
+        be_grp.add_argument('-z', '--batch_size', type=int, default=128,
+                            help='batch size')
 
         return
 
@@ -167,15 +193,20 @@ class NeonArgparser(configargparse.ArgumentParser):
     def add_arg(self):
         pass
 
-    def parse_args(self):
+    def parse_args(self, gen_be=True):
         '''
         Parse the command line arguments and setup neon
         runtime environment accordingly
+
+        Arguments:
+            gen_be (bool): if False, the arg parser will not
+                           generate the backend
 
         Returns:
             namespace: contains the parsed arguments as attributes
         '''
         args = super(NeonArgparser, self).parse_args()
+        err_msg = None  # used for relaying exception to logger
 
         # set up the logging
         # max thresh is 50 (critical only), min is 10 (debug or higher)
@@ -184,7 +215,7 @@ class NeonArgparser(configargparse.ArgumentParser):
         except (AttributeError, TypeError):
             # if defaults are not set or not -v given
             # for latter will get type error
-            log_thresh = 40
+            log_thresh = 30
         args.log_thresh = log_thresh
 
         # logging formater
@@ -206,9 +237,12 @@ class NeonArgparser(configargparse.ArgumentParser):
             filelog.setLevel(log_thresh)
             main_logger.addHandler(filelog)
 
-            # if a log file is specified the
-            # stderr is set ot default verbosity
-            stderrlog.setLevel(logging.ERROR)
+            # if a log file is specified and progress bar displayed,
+            # log only errors to console.
+            if args.no_progress_bar:
+                stderrlog.setLevel(log_thresh)
+            else:
+                stderrlog.setLevel(logging.ERROR)
         else:
             stderrlog.setLevel(log_thresh)
 
@@ -225,36 +259,57 @@ class NeonArgparser(configargparse.ArgumentParser):
         args.progress_bar = not args.no_progress_bar
 
         if args.backend == 'cpu' and args.rounding > 0:
-            raise NotImplementedError('CPU backend does not support stochastic roudning')
+            err_msg = 'CPU backend does not support stochastic rounding'
+            logger.exception(err_msg)
+            raise NotImplementedError(err_msg)
 
         # done up front to avoid losing data due to incorrect path
         if args.save_path:
-            if not os.access(os.path.dirname(os.path.abspath(args.save_path)),
-                             os.R_OK | os.W_OK):
-                raise ValueError('Can not write to save_path dir %s' % args.save_path)
+            savedir = os.path.dirname(os.path.abspath(args.save_path))
+            if not os.access(savedir, os.R_OK | os.W_OK):
+                err_msg = 'Can not write to save_path dir %s' % savedir
             if os.path.exists(args.save_path):
-                # if file exists check that it can be overwritten
+                logger.warning('save file %s exists, attempting to overwrite' % args.save_path)
                 if not os.access(args.save_path, os.R_OK | os.W_OK):
-                    raise IOError('Can not write to save_path file %s' % args.save_path)
+                    err_msg = 'Can not write to save_path file %s' % args.save_path
+            if err_msg:
+                logger.exception(err_msg)
+                raise IOError(err_msg)
 
         if (args.serialize > 0) and (args.save_path is None):
-            logger.warn('No path given for model serialization,'
-                        'using default "neon_model.pkl"')
             args.save_path = "neon_model.pkl"
+            logger.warn('No path given for model serialization, using default "%s"',
+                        args.save_path)
         if (args.save_path is not None) and (args.serialize == 0):
-            logger.warn('No schedule given for model serialization,'
-                        'using default 1')
             args.serialize = 1
+            logger.warn('No schedule given for model serialization, using default %d',
+                        args.serialize)
 
         if args.model_file:
+            err_msg = None
             if not os.path.exists(args.model_file):
-                raise IOError('Model file %s not present' % args.model_file)
+                err_msg = 'Model file %s not present' % args.model_file
             if not os.access(args.model_file, os.R_OK):
-                raise IOError('Not read access for model file %s' % args.model_file)
+                err_msg = 'No read access for model file %s' % args.model_file
+            if err_msg:
+                logger.exception(err_msg)
+                raise IOError(err_msg)
+
+        # extended parsers may need to generate backend after argparsing
+        if gen_be:
+            # generate the backend
+            gen_backend(backend=args.backend,
+                        rng_seed=args.rng_seed,
+                        device_id=args.device_id,
+                        batch_size=args.batch_size,
+                        datatype=args.datatype,
+                        stochastic_round=args.rounding,
+                        max_devices=args.max_devices)
 
         # display what command line / config options were set (and from where)
         logger.info(self.format_values())
 
         self._PARSED = True
         self.args = args
+        args.callback_args = extract_valid_args(args, Callbacks.__init__, startidx=1)
         return args

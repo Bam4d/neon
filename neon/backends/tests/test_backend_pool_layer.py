@@ -42,7 +42,6 @@ def pixel_indices(pool, kj, mt, pr, qs):
     D, H, W = pool.DHW
     HW = H * W
     DHW = D * H * W
-    imax = C * D * H * W
     idx = []
 
     for j in range(J):
@@ -64,10 +63,7 @@ def pixel_indices(pool, kj, mt, pr, qs):
                     x = qs + s
                     if yb and x >= 0 and x < W:
                         xi = yi + x
-                    else:
-                        xi = imax  # out of bounds
-
-                    idx.append(xi)
+                        idx.append(xi)
     return idx
 
 
@@ -76,11 +72,12 @@ def run_backend_pool(lib, layer, I, E, dtype):
     beI = lib.array(I, dtype=dtype)
     beE = lib.array(E, dtype=dtype)
     beO = lib.zeros(layer.dimO, dtype=dtype)
+    beA = lib.zeros(layer.dimO, dtype=np.int8)
     beB = lib.zeros(layer.dimI, dtype=dtype)
 
     for i in range(repeat):
-        lib.fprop_pool(layer, beI, beO)
-        lib.bprop_pool(layer, beI, beE, beB)
+        lib.fprop_pool(layer, beI, beO, beA)
+        lib.bprop_pool(layer, beE, beB, beA)
 
     return beO, beB
 
@@ -210,3 +207,7 @@ def test_pool_layer(poolargs):
         assert np.allclose(ncA.get(), cpuA, rtol=0, atol=1e-5)
 
     del ng, nc
+
+if __name__ == '__main__':
+    fargs = ["max"]
+    test_pool_layer(fargs)

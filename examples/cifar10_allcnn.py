@@ -22,8 +22,7 @@ Reference:
 ..  _[Springenber2015]: http://arxiv.org/pdf/1412.6806.pdf
 """
 
-from neon.backends import gen_backend
-from neon.initializers import GlorotUniform
+from neon.initializers import Gaussian
 from neon.optimizers import GradientDescentMomentum, Schedule
 from neon.layers import Conv, Dropout, Activation, Pooling, GeneralizedCost
 from neon.transforms import Rectlin, Softmax, CrossEntropyMulti, Misclassification
@@ -34,61 +33,64 @@ from neon.util.argparser import NeonArgparser
 
 # parse the command line arguments
 parser = NeonArgparser(__doc__)
+parser.add_argument("--learning_rate", default=0.05, help="initial learning rate")
+parser.add_argument("--weight_decay", default=0.001, help="weight decay")
+parser.add_argument('--deconv', action='store_true',
+                    help='save visualization data from deconvolution')
 args = parser.parse_args()
 
 # hyperparameters
-batch_size = 128
 num_epochs = args.epochs
 
-# setup backend
-be = gen_backend(backend=args.backend,
-                 batch_size=batch_size,
-                 rng_seed=args.rng_seed,
-                 device_id=args.device_id,
-                 default_dtype=args.datatype)
-
-(X_train, y_train), (X_test, y_test), nclass = load_cifar10(path=args.data_dir)
+(X_train, y_train), (X_test, y_test), nclass = load_cifar10(path=args.data_dir,
+                                                            normalize=False,
+                                                            contrast_normalize=True,
+                                                            whiten=True)
 
 # really 10 classes, pad to nearest power of 2 to match conv output
 train_set = DataIterator(X_train, y_train, nclass=16, lshape=(3, 32, 32))
 valid_set = DataIterator(X_test, y_test, nclass=16, lshape=(3, 32, 32))
 
-init_uni = GlorotUniform()
-opt_gdm = GradientDescentMomentum(learning_rate=0.5,
-                                  schedule=Schedule(step_config=[200, 250, 300],
-                                                    change=0.1),
-                                  momentum_coef=0.9, wdecay=.0001)
+init_uni = Gaussian(scale=0.05)
+opt_gdm = GradientDescentMomentum(learning_rate=float(args.learning_rate), momentum_coef=0.9,
+                                  wdecay=float(args.weight_decay),
+                                  schedule=Schedule(step_config=[200, 250, 300], change=0.1))
+
 relu = Rectlin()
-layers = []
-conv = dict(init=init_uni, batch_norm=True, activation=relu)
-convp1 = dict(init=init_uni, batch_norm=True, activation=relu, padding=1)
-convp1s2 = dict(init=init_uni, batch_norm=True, activation=relu, padding=1, strides=2)
+conv = dict(init=init_uni, batch_norm=False, activation=relu)
+convp1 = dict(init=init_uni, batch_norm=False, activation=relu, padding=1)
+convp1s2 = dict(init=init_uni, batch_norm=False, activation=relu, padding=1, strides=2)
 
-layers.append(Dropout(keep=.8))
-layers.append(Conv((3, 3, 96), **conv))
-layers.append(Conv((3, 3, 96), **convp1))
-layers.append(Conv((3, 3, 96), **convp1s2))
-layers.append(Dropout(keep=.5))
-
-layers.append(Conv((3, 3, 192), **convp1))
-layers.append(Conv((3, 3, 192), **convp1))
-layers.append(Conv((3, 3, 192), **convp1s2))
-layers.append(Dropout(keep=.5))
-
-layers.append(Conv((3, 3, 192), **conv))
-layers.append(Conv((1, 1, 192), **conv))
-layers.append(Conv((1, 1, 16), init=init_uni, activation=relu))
-
-layers.append(Pooling(6, op="avg"))
-layers.append(Activation(Softmax()))
+layers = [Dropout(keep=.8),
+          Conv((3, 3, 96), **convp1),
+          Conv((3, 3, 96), **convp1),
+          Conv((3, 3, 96), **convp1s2),
+          Dropout(keep=.5),
+          Conv((3, 3, 192), **convp1),
+          Conv((3, 3, 192), **convp1),
+          Conv((3, 3, 192), **convp1s2),
+          Dropout(keep=.5),
+          Conv((3, 3, 192), **convp1),
+          Conv((1, 1, 192), **conv),
+          Conv((1, 1, 16), **conv),
+          Pooling(8, op="avg"),
+          Activation(Softmax())]
 
 cost = GeneralizedCost(costfunc=CrossEntropyMulti())
 
 mlp = Model(layers=layers)
 
+if args.model_file:
+    import os
+    assert os.path.exists(args.model_file), '%s not found' % args.model_file
+    mlp.load_weights(args.model_file)
+
 # configure callbacks
-callbacks = Callbacks(mlp, train_set, output_file=args.output_file, valid_set=valid_set,
-                      valid_freq=args.validation_freq, progress_bar=args.progress_bar)
+callbacks = Callbacks(mlp, train_set, eval_set=valid_set, **args.callback_args)
+
+if args.deconv:
+    callbacks.add_deconv_callback(train_set, valid_set)
+
 
 mlp.fit(train_set, optimizer=opt_gdm, num_epochs=num_epochs, cost=cost, callbacks=callbacks)
 print('Misclassification error = %.1f%%' % (mlp.eval(valid_set, metric=Misclassification())*100))

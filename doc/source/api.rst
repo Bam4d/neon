@@ -56,11 +56,14 @@ API
    neon.callbacks.callbacks.Callback
    neon.callbacks.callbacks.SerializeModelCallback
    neon.callbacks.callbacks.TrainCostCallback
-   neon.callbacks.callbacks.ValidationCallback
+   neon.callbacks.callbacks.LossCallback
+   neon.callbacks.callbacks.MetricCallback
+   neon.callbacks.callbacks.HistCallback
    neon.callbacks.callbacks.ProgressBarCallback
    neon.callbacks.callbacks.TrainLoggerCallback
    neon.callbacks.callbacks.SaveBestStateCallback
    neon.callbacks.callbacks.EarlyStopCallback
+   neon.callbacks.callbacks.DeconvCallback
 
 
 ``neon.data``
@@ -71,13 +74,12 @@ API
    :nosignatures:
 
    neon.data.dataiterator.DataIterator
-   neon.data.image.Image
-   neon.data.image.ImgMaster
+   neon.data.imageloader.ImageLoader
    neon.data.imagecaption.ImageCaption
-   neon.data.loader.load_cifar10
-   neon.data.loader.load_mnist
-   neon.data.loader.load_text
-   neon.data.loader.load_dataset
+   neon.data.datasets.load_cifar10
+   neon.data.datasets.load_mnist
+   neon.data.datasets.load_text
+   neon.data.datasets.load_dataset
    neon.data.text.Text
 
 
@@ -116,17 +118,20 @@ API
    neon.layers.layer.GeneralizedCost
    neon.layers.layer.GeneralizedCostMask
    neon.layers.layer.BatchNorm
-   neon.layers.merge.MergeSum
-   neon.layers.merge.MergeConcat
-   neon.layers.merge.MergeConcatSequence
    neon.layers.recurrent.Recurrent
    neon.layers.recurrent.LSTM
    neon.layers.recurrent.GRU
    neon.layers.recurrent.RecurrentSum
    neon.layers.recurrent.RecurrentMean
    neon.layers.recurrent.RecurrentLast
+   neon.layers.container.LayerContainer
+   neon.layers.container.Sequential
+   neon.layers.container.Tree
+   neon.layers.container.MergeBroadcast
+   neon.layers.container.MergeMultistream
+   neon.layers.container.Multicost
 
-   
+
 ``neon.models``
 ---------------
 
@@ -154,7 +159,7 @@ API
    neon.optimizers.optimizer.MultiOptimizer
 
 ``neon.activations``
--------------------
+--------------------
 
 .. autosummary::
    :toctree: generated/

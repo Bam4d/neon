@@ -22,41 +22,36 @@ Reference:
     Generating sequences with recurrent neural networks `[Graves2014]`_
 .. _[Zaremba2015]: http://arxiv.org/pdf/1409.2329v5.pdf
 .. _[Graves2014]: http://arxiv.org/pdf/1308.0850.pdf
+
+Usage:
+    python examples/word_lstm.py -e 13 -eval 1 --rlayer_type lstm
+
 """
 
 from neon.backends import gen_backend
-from neon.data import Text
-from neon.data import load_text
+from neon.data import Text, load_text
 from neon.initializers import Uniform
-from neon.layers import GeneralizedCost, LSTM, Affine, GRU
+from neon.layers import GeneralizedCost, LSTM, Affine, GRU, LookupTable
 from neon.models import Model
-from neon.optimizers import RMSProp
+from neon.optimizers import GradientDescentMomentum, Schedule
 from neon.transforms import Logistic, Tanh, Softmax, CrossEntropyMulti
 from neon.callbacks.callbacks import Callbacks
-from neon.util.argparser import NeonArgparser
+from neon.util.argparser import NeonArgparser, extract_valid_args
 
 # parse the command line arguments
 parser = NeonArgparser(__doc__)
-args = parser.parse_args()
-
-num_epochs = args.epochs
-
-# Set the type of layer to use {lstm|gru}
-rlayer_type = "lstm"
+parser.add_argument('--rlayer_type', default='lstm', choices=['gru', 'lstm'],
+                    help='type of recurrent layer to use (gru or lstm)')
+args = parser.parse_args(gen_be=False)
 
 # hyperparameters from the reference
-batch_size = 20
+args.batch_size = 20
 time_steps = 20
 hidden_size = 200
-clip_gradients = True
-gradient_limit = 5
+gradient_clip_norm = 5
 
 # setup backend
-be = gen_backend(backend=args.backend,
-                 batch_size=batch_size,
-                 rng_seed=args.rng_seed,
-                 device_id=args.device_id,
-                 default_dtype=args.datatype)
+be = gen_backend(**extract_valid_args(args, gen_backend))
 
 # download penn treebank
 train_path = load_text('ptb-train', path=args.data_dir)
@@ -65,23 +60,24 @@ valid_path = load_text('ptb-valid', path=args.data_dir)
 # load data and parse on word-level
 # a Text object can take a given tokenizer, for word-level parsing, it is str.split
 # a user can pass in a custom-defined tokenzier as well
-train_set = Text(time_steps, train_path, tokenizer=str.split)
-valid_set = Text(time_steps, valid_path, vocab=train_set.vocab, tokenizer=str.split)
+tokenizer = lambda s: s.replace('\n', '<eos>').split()
+train_set = Text(time_steps, train_path, tokenizer=tokenizer, onehot_input=False)
+valid_set = Text(time_steps, valid_path, vocab=train_set.vocab, tokenizer=tokenizer,
+                 onehot_input=False)
 
 # weight initialization
-init = Uniform(low=-0.08, high=0.08)
+init = Uniform(low=-0.1, high=0.1)
 
 # model initialization
-if rlayer_type == 'lstm':
-    rlayer1 = LSTM(hidden_size, init, Logistic(), Tanh())
-    rlayer2 = LSTM(hidden_size, init, Logistic(), Tanh())
-elif rlayer_type == 'gru':
-    rlayer1 = GRU(hidden_size, init, activation=Tanh(), gate_activation=Logistic())
-    rlayer2 = GRU(hidden_size, init, activation=Tanh(), gate_activation=Logistic())
+rlayer_params = {"output_size": hidden_size, "init": init,
+                 "activation": Tanh(), "gate_activation": Logistic()}
+if args.rlayer_type == 'lstm':
+    rlayer1, rlayer2 = LSTM(**rlayer_params), LSTM(**rlayer_params)
 else:
-    raise NotImplementedError('%s layer not implemented' % rlayer_type)
+    rlayer1, rlayer2 = GRU(**rlayer_params), GRU(**rlayer_params)
 
 layers = [
+    LookupTable(vocab_size=len(train_set.vocab), embedding_dim=hidden_size, init=init),
     rlayer1,
     rlayer2,
     Affine(len(train_set.vocab), init, bias=init, activation=Softmax())
@@ -91,17 +87,13 @@ cost = GeneralizedCost(costfunc=CrossEntropyMulti(usebits=True))
 
 model = Model(layers=layers)
 
-optimizer = RMSProp(clip_gradients=clip_gradients, gradient_limit=gradient_limit,
-                    stochastic_round=args.rounding)
+# vanilla gradient descent with decay schedule on learning rate and gradient scaling
+learning_rate_sched = Schedule(range(5, args.epochs), .5)
+optimizer = GradientDescentMomentum(1, 0, gradient_clip_norm=gradient_clip_norm,
+                                    schedule=learning_rate_sched)
 
 # configure callbacks
-callbacks = Callbacks(model, train_set, output_file=args.output_file,
-                      valid_set=valid_set, valid_freq=args.validation_freq,
-                      progress_bar=args.progress_bar)
+callbacks = Callbacks(model, train_set, eval_set=valid_set, **args.callback_args)
 
 # train model
-model.fit(train_set,
-          optimizer=optimizer,
-          num_epochs=num_epochs,
-          cost=cost,
-          callbacks=callbacks)
+model.fit(train_set, optimizer=optimizer, num_epochs=args.epochs, cost=cost, callbacks=callbacks)

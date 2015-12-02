@@ -12,5 +12,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ----------------------------------------------------------------------------
-from neon.initializers.initializer import (Constant, Uniform, Gaussian,
-                                           GlorotUniform)
+from neon.initializers.initializer import (Constant, Uniform, Gaussian, GlorotUniform, Xavier,
+                                           Orthonormal)

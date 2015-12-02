@@ -18,7 +18,6 @@ Example highlighting the ability to mix different optimizers in different
 layers, or different components of the same layer.
 """
 
-from neon.backends import gen_backend
 from neon.data import DataIterator, load_mnist
 from neon.initializers import Gaussian, Constant
 from neon.layers import GeneralizedCost, Affine
@@ -32,20 +31,9 @@ from neon.util.argparser import NeonArgparser
 parser = NeonArgparser(__doc__)
 args = parser.parse_args()
 
-# hyperparameters
-batch_size = 128
-num_epochs = args.epochs
-
-# setup backend
-be = gen_backend(backend=args.backend,
-                 batch_size=batch_size,
-                 rng_seed=args.rng_seed,
-                 device_id=args.device_id,
-                 default_dtype=args.datatype)
-
 (X_train, y_train), (X_test, y_test), nclass = load_mnist(args.data_dir)
-train_set = DataIterator(X_train, y_train, nclass=nclass)
-valid_set = DataIterator(X_test, y_test, nclass=nclass)
+train_set = DataIterator(X_train, y_train, nclass=nclass, lshape=(1, 28, 28))
+valid_set = DataIterator(X_test, y_test, nclass=nclass, lshape=(1, 28, 28))
 
 # weight initialization
 init_norm = Gaussian(loc=0.0, scale=0.01)
@@ -72,8 +60,6 @@ opt = MultiOptimizer({'default': optimizer_one,
                       'special_linear': optimizer_two})
 
 # configure callbacks
-callbacks = Callbacks(mlp, train_set, output_file=args.output_file,
-                      valid_set=valid_set, valid_freq=args.validation_freq,
-                      progress_bar=args.progress_bar)
+callbacks = Callbacks(mlp, train_set, eval_set=valid_set, **args.callback_args)
 
-mlp.fit(train_set, optimizer=opt, num_epochs=num_epochs, cost=cost, callbacks=callbacks)
+mlp.fit(train_set, optimizer=opt, num_epochs=args.epochs, cost=cost, callbacks=callbacks)

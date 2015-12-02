@@ -17,7 +17,6 @@
 Small CIFAR10 based MLP with fully connected layers.
 """
 
-from neon.backends import gen_backend
 from neon.data import DataIterator, load_cifar10
 from neon.initializers import Uniform
 from neon.layers import GeneralizedCost, Affine
@@ -31,39 +30,25 @@ from neon.util.argparser import NeonArgparser
 parser = NeonArgparser(__doc__)
 args = parser.parse_args()
 
-# hyperparameters
-batch_size = 128
-num_epochs = args.epochs
-
-# setup backend
-be = gen_backend(backend=args.backend,
-                 batch_size=batch_size,
-                 rng_seed=args.rng_seed,
-                 device_id=args.device_id,
-                 default_dtype=args.datatype)
-
 (X_train, y_train), (X_test, y_test), nclass = load_cifar10(path=args.data_dir)
 
-train = DataIterator(X_train, y_train, nclass=nclass)
-test = DataIterator(X_test, y_test, nclass=nclass)
+train = DataIterator(X_train, y_train, nclass=nclass, lshape=(3, 32, 32))
+test = DataIterator(X_test, y_test, nclass=nclass, lshape=(3, 32, 32))
 
 init_uni = Uniform(low=-0.1, high=0.1)
 opt_gdm = GradientDescentMomentum(learning_rate=0.01, momentum_coef=0.9)
 
 # set up the model layers
-layers = []
-layers.append(Affine(nout=200, init=init_uni, activation=Rectlin()))
-layers.append(Affine(nout=10, init=init_uni, activation=Logistic(shortcut=True)))
+layers = [Affine(nout=200, init=init_uni, activation=Rectlin()),
+          Affine(nout=10, init=init_uni, activation=Logistic(shortcut=True))]
 
 cost = GeneralizedCost(costfunc=CrossEntropyBinary())
 
 mlp = Model(layers=layers)
 
 # configure callbacks
-callbacks = Callbacks(mlp, train, output_file=args.output_file,
-                      valid_set=test, valid_freq=args.validation_freq,
-                      progress_bar=args.progress_bar)
+callbacks = Callbacks(mlp, train, eval_set=test, **args.callback_args)
 
-mlp.fit(train, optimizer=opt_gdm, num_epochs=num_epochs, cost=cost, callbacks=callbacks)
+mlp.fit(train, optimizer=opt_gdm, num_epochs=args.epochs, cost=cost, callbacks=callbacks)
 
-print mlp.eval(test, metric=Misclassification())
+print('Misclassification error = %.1f%%' % (mlp.eval(test, metric=Misclassification())*100))

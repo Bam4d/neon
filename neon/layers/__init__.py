@@ -13,7 +13,8 @@
 # limitations under the License.
 # ----------------------------------------------------------------------------
 from neon.layers.layer import (Linear, Bias, Affine, Conv, Convolution, GeneralizedCost, Dropout,
-                               Pooling, Activation, BatchNorm, BatchNormAutodiff,
-                               Deconv, Deconvolution, GeneralizedCostMask, LookupTable)
-from neon.layers.merge import Merge, MergeSum, MergeConcat, MergeConcatSequence
+                               Pooling, Activation, DataTransform, BatchNorm, BatchNormAutodiff,
+                               Deconv, Deconvolution, GeneralizedCostMask, LookupTable,
+                               DropoutBinary, BranchNode)
 from neon.layers.recurrent import Recurrent, LSTM, GRU, RecurrentSum, RecurrentMean, RecurrentLast
+from neon.layers.container import Tree, Sequential, MergeMultistream, MergeBroadcast, Multicost

@@ -114,7 +114,9 @@ def check_gru(seq_len, input_size, hidden_size,
 
     # run neon fprop
     gru.configure((input_size, seq_len))
+    gru.prev_layer = True
     gru.allocate()
+    gru.set_deltas([gru.be.iobuf(gru.in_shape)])
     gru.fprop(inpa)
 
     # reference numpy GRU
@@ -152,7 +154,7 @@ def check_gru(seq_len, input_size, hidden_size,
                                                                  deltas_ref)
 
     print '====Verifying hidden states===='
-    print allclose_with_out(gru.h_buffer.get(),
+    print allclose_with_out(gru.outputs.get(),
                             h_ref_list,
                             rtol=0.0,
                             atol=1.0e-5)
@@ -274,7 +276,7 @@ def reset_gru(gru):
     # cleared
     gru.x = None
     gru.xs = None  # just in case
-    gru.h_buffer = None
+    gru.outputs = None
     return
 
 
@@ -342,12 +344,14 @@ def gradient_calc(seq_len, input_size, hidden_size, batch_size,
         inp_bl = np.random.randn(*input_shape)
 
     # neon gru instance
-    gru = GRU(hidden_size, Gaussian(), Tanh(), Logistic())
+    gru = GRU(hidden_size, init=Gaussian(), activation=Tanh(), gate_activation=Logistic())
     inpa = gru.be.array(np.copy(inp_bl))
 
     # run fprop on the baseline input
     gru.configure((input_size, seq_len))
+    gru.prev_layer = True
     gru.allocate()
+    gru.set_deltas([gru.be.iobuf(gru.in_shape)])
     out_bl = gru.fprop(inpa).get()
 
     # random scaling/hash to generate fake loss

@@ -64,7 +64,7 @@ For example, during the first epoch of training, if the end of the data set
 is reached and there is not enough data for a full mini-batch, extra data
 will be pulled from the beginning of the data set to fill up a
 complete mini-batch. On the next epoch, the data used will start from where
-the last epoch left off, not from the beginning of the data set. This process 
+the last epoch left off, not from the beginning of the data set. This process
 will continue for each epoch of training and, since the next epoch may not
 start from the beginning of the data set, it is possible that for some of the
 epochs the last item of data will fall at the end of the mini-batch.  For such
@@ -75,11 +75,49 @@ count for that epoch may be smaller than the other epochs.
 How is padding implemented?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+For convolution, deconvolution and pooling layers, zero padding can be added
+to the edges of the input data to a layer.  If this parameter is set to an
+integer, a uniform zero pad of that length will be added to the top, bottom,
+left and right of the input data.
 
-For convolution, deconvolution and pooling layers, zero padding can be added to the edges
-of the input data to a layer.  If this parameter is set to an integer, a uniform zero pad
-of that length will be added to the top, bottom, left and right of the input data.  If a
-dictionary with the keys 'pad_h' and 'pad_w' is used, then the H dimension of the data
-will be padded with a zero padding of length pad_h and the W dimension with a padding of
-length pad_w. Note that this is different from the cuda-convnet2 style of padding in that
-padding is added to both ends of the dimension instead of just one end.
+If a dictionary with the keys ``pad_h`` and ``pad_w`` is used, then the height
+dimension of the data will be padded with a zero padding of length ``pad_h``
+and the width dimension with a padding of length ``pad_w``.  Note that this is
+different from the cuda-convnet2 style of padding in that padding is added to
+both ends of the dimension instead of just one end.
+
+
+I'm getting an error loading a serialized model
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Starting with release 1.1.0 there was a change to the way that the
+output sizes of convolution and pooling layers are calculated.  This change
+could make this new version incompatible with models saved using previous
+versions of neon.  With release 1.1.0, the calculation of the output size
+of convolution and pooling layers stops before the kernel runs over the edge
+of the input data plus the padding.  The formula for this is:
+
+output_size = floor(input_size + 2*pad - kernel_size)/stride + 1
+
+This change in output sizes will alter the topology of some networks and cause
+errors when trying to load weights saved with a previous version of neon.  For
+example, in a model with strided convolution layers below a set of linear
+layers, the size of the first linear layer to receive input from a convolution
+layer may change in this new release. This size mismatch may cause errors when
+trying to initialize a neon model using weights saved with an older version of
+neon.
+
+
+I'm getting an error when I try to use ImgMaster
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In release 1.1.0, the format of the mean image saved in the
+`dataset_cache.pkl` file has changed.  Previous versions of neon were storing
+a mean value for each pixel of the input image whereas in the new version only
+a single mean value is stored for each input channel.  So now, for an RGB
+image, the mean image has just 3 values, one for each color channel.  We have
+provided a utility script: update_dataset_cache.py_ to update the old cache
+files to the new format. Make sure you have read and write privileges to
+change the file before running the utility.
+
+.. _update_dataset_cache.py: https://github.com/NervanaSystems/neon/blob/master/neon/util/update_dataset_cache.py

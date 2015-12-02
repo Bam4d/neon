@@ -32,27 +32,16 @@ from neon.util.persist import load_obj, save_obj
 from neon.data import load_i1kmeta
 from neon.util.argparser import NeonArgparser
 
-parser = NeonArgparser(__doc__)
-parser.add_argument('--set_type', help='(i1k|directory)', required=True,
-                    choices=['i1k', 'directory'])
-parser.add_argument('--image_dir', help='Directory to find images', required=True)
-parser.add_argument('--target_size', type=int, default=256,
-                    help='Size in pixels to scale images (Must be 256 for i1k dataset)')
-parser.add_argument('--macro_size', type=int, default=5000, help='Images per processed batch')
-parser.add_argument('--file_pattern', default='*.jpg', help='Image extension to include in'
-                    'directory crawl')
-args = parser.parse_args()
-
-logger = logging.getLogger(__name__)
-
 
 # NOTE: We have to leave this helper function out of the class to use multiprocess pool.map
 def proc_img(target_size, squarecrop, is_string=False, imgfile=None):
     imgfile = StringIO(imgfile) if is_string else imgfile
     im = PILImage.open(imgfile)
 
-    # This part does the processing
     scale_factor = target_size / np.float32(min(im.size))
+    if scale_factor == 1 and im.size[0] == im.size[1] and is_string is False:
+        return np.fromfile(imgfile, dtype=np.uint8)
+
     (wnew, hnew) = map(lambda x: int(round(scale_factor * x)), im.size)
     if scale_factor != 1:
         filt = PILImage.BICUBIC if scale_factor > 1 else PILImage.ANTIALIAS
@@ -71,6 +60,7 @@ class BatchWriter(object):
 
     def __init__(self, out_dir, image_dir, target_size=256, squarecrop=True, validation_pct=0.2,
                  class_samples_max=None, file_pattern='*.jpg', macro_size=3072):
+        np.random.seed(0)
         self.out_dir = os.path.expanduser(out_dir)
         self.image_dir = os.path.expanduser(image_dir)
         self.macro_size = macro_size
@@ -83,7 +73,7 @@ class BatchWriter(object):
         self.train_file = os.path.join(self.out_dir, 'train_file.csv.gz')
         self.val_file = os.path.join(self.out_dir, 'val_file.csv.gz')
         self.meta_file = os.path.join(self.out_dir, 'dataset_cache.pkl')
-        self.global_mean = None
+        self.global_mean = np.array([0, 0, 0]).reshape((3, 1))
         self.batch_prefix = 'data_batch_'
 
     def write_csv_files(self):
@@ -99,16 +89,13 @@ class BatchWriter(object):
         for subdir in subdirs:
             subdir_label = self.label_dict[os.path.basename(subdir)]
             files = glob(os.path.join(subdir, self.file_pattern))
-            np.random.shuffle(files)
             if self.class_samples_max is not None:
                 files = files[:self.class_samples_max]
             lines = [(filename, subdir_label) for filename in files]
             v_idx = int(self.validation_pct * len(lines))
             tlines += lines[v_idx:]
             vlines += lines[:v_idx]
-
         np.random.shuffle(tlines)
-        np.random.shuffle(vlines)
 
         if not os.path.exists(self.out_dir):
             os.makedirs(self.out_dir)
@@ -125,7 +112,10 @@ class BatchWriter(object):
 
         self.val_nrec = len(vlines)
         self.nval = -(-self.val_nrec // self.macro_size)
-        self.val_start = 10 ** int(np.log10(self.ntrain * 10))
+        if self.ntrain == 0:
+            self.val_start = 0
+        else:
+            self.val_start = 10 ** int(np.log10(self.ntrain * 10))
 
     def parse_file_list(self, infile):
         lines = np.loadtxt(infile, delimiter=',', skiprows=1, dtype={'names': ('fname', 'l_id'),
@@ -188,9 +178,18 @@ class BatchWriter(object):
 
     def run(self):
         self.write_csv_files()
-        namelist = ['train', 'validation']
-        filelist = [self.train_file, self.val_file]
-        startlist = [self.train_start, self.val_start]
+        if self.validation_pct == 0:
+            namelist = ['train']
+            filelist = [self.train_file]
+            startlist = [self.train_start]
+        elif self.validation_pct == 1:
+            namelist = ['validation']
+            filelist = [self.val_file]
+            startlist = [self.val_start]
+        else:
+            namelist = ['train', 'validation']
+            filelist = [self.train_file, self.val_file]
+            startlist = [self.train_start, self.val_start]
         for sname, fname, start in zip(namelist, filelist, startlist):
             print("%s %s %s" % (sname, fname, start))
             if fname is not None and os.path.exists(fname):
@@ -234,6 +233,7 @@ class BatchWriterImagenet(BatchWriter):
         meta_file = os.path.join(meta_dir, 'neon_ILSVRC2012_devmeta.pkl')
         self.meta = load_obj(meta_file)
         self.__dict__.update(self.meta)  # get label_dict, label_names, global_mean from meta
+        self.global_mean = np.mean(self.global_mean.reshape(3, -1), axis=1).reshape(3, 1)[::-1]
 
         np.random.seed(0)
         with tarfile.open(train_tar) as tf:
@@ -268,6 +268,19 @@ class BatchWriterImagenet(BatchWriter):
 
 
 if __name__ == "__main__":
+    parser = NeonArgparser(__doc__)
+    parser.add_argument('--set_type', help='(i1k|directory)', required=True,
+                        choices=['i1k', 'directory'])
+    parser.add_argument('--image_dir', help='Directory to find images', required=True)
+    parser.add_argument('--target_size', type=int, default=256,
+                        help='Size in pixels to scale images (Must be 256 for i1k dataset)')
+    parser.add_argument('--macro_size', type=int, default=5000, help='Images per processed batch')
+    parser.add_argument('--file_pattern', default='*.jpg', help='Image extension to include in'
+                        'directory crawl')
+    args = parser.parse_args()
+
+    logger = logging.getLogger(__name__)
+
     # Supply dataset type and location
     if args.set_type == 'i1k':
         bw = BatchWriterImagenet(out_dir=args.data_dir, image_dir=args.image_dir,

@@ -26,6 +26,7 @@ MNIST can be fetched in the following manner:
 
 .. code-block:: python
 
+    from neon.data import load_mnist
     (X_train, y_train), (X_test, y_test), nclass = load_mnist()
 
 
@@ -39,7 +40,10 @@ CIFAR10 can be fetched in the following manner:
 
 .. code-block:: python
 
+    from neon.data import load_cifar10
     (X_train, y_train), (X_test, y_test), nclass = load_cifar10()
+    train = DataIterator(X_train, y_train, nclass=nclass, lshape=(3, 32, 32))
+    test = DataIterator(X_test, y_test, nclass=nclass, lshape=(3, 32, 32))
 
 
 ImageCaption
@@ -47,7 +51,7 @@ ImageCaption
 This dataset uses precomputed CNN image features and caption sentences. It
 works with the
 `flickr8k <http://nlp.cs.illinois.edu/HockenmaierGroup/8k-pictures.html>`_,
-`flickr30k <http://shannon.cs.illinois.edu/DenotationGraph/>`_, and 
+`flickr30k <http://shannon.cs.illinois.edu/DenotationGraph/>`_, and
 `COCO <http://mscoco.org/>`_ datasets and uses the VGG image features and
 sentences from http://cs.stanford.edu/people/karpathy/deepimagesent/ which
 have been converted to python .pkl format. These datasets have 5 reference
@@ -60,9 +64,11 @@ The image caption data can be fetched in the following manner:
 .. code-block:: python
 
     # download dataset
+    from neon.data import load_flickr8k
     data_path = load_flickr8k()  # Other setnames are flickr30k and COCO
 
     # load data
+    from neon.data import ImageCaption
     train_set = ImageCaption(path=data_path, max_images=-1)
 
 Text
@@ -81,10 +87,12 @@ mapping can be used for all training, testing and validation sets.
 .. code-block:: python
 
     # download Penn Treebank
+    from neon.data import load_text
     train_path = load_text('ptb-train', path=args.data_dir)
     valid_path = load_text('ptb-valid', path=args.data_dir)
 
     # load data and parse on word-level
+    from neon.data import Text
     train_set = Text(time_steps, train_path, tokenizer=str.split)
     valid_set = Text(time_steps, valid_path, vocab=train_set.vocab, tokenizer=str.split)
 
@@ -102,19 +110,35 @@ is where the original tar files are saved.
                                       --set_type=i1k
 
 
-Then an :py:class:`ImgMaster<neon.data.image.ImgMaster>` will start an image
-server and client to feed images to the model.
+Then an :py:class:`ImageLoader<neon.data.imageloader.ImageLoader>` instance can be
+started to feed images to the model.
 
 .. code-block:: python
 
-    train = ImgMaster(repo_dir=args.data_dir, inner_size=224, set_name='train')
+    from neon.data import ImageLoader
+    train = ImageLoader(repo_dir=args.data_dir, inner_size=224, set_name='train')
+
+QA and bAbI 
+-----------
+A bAbI dataset object can be created by specifying which task and which subset (20 tasks and 4 subsets in bAbI) to retrieve. The object will use built-in metadata to get bAbI data from online sources, save and unzip the files for that task locally, and then vectorize the story-question-answer data. The training and test files are both needed to build a vocabulary set.
+
+A general question&answering container can take the story-question-answer data from a bAbI data object and create a data iterator for training.
+
+.. code-block:: python
+
+    # get the bAbI data
+    babi = BABI(path='.', task='qa15_basic-deduction', subset='en')
+
+    # create a QA iterator
+    train_set = QA(*babi.train)
+    valid_set = QA(*babi.test)
 
 
 Add a new dataset
 ------------------
 
 You can also add your own dataset, where the input and the labels are
-n-dimensional arrays. Here is an example of what adding image data would look 
+n-dimensional arrays. Here is an example of what adding image data would look
 like (with random pixel and label values).
 
 .. code-block:: python

@@ -121,10 +121,67 @@ def load_mnist(path=".", normalize=True):
             X_train = X_train / 255.
             X_test = X_test / 255.
 
-        return (X_train, y_train), (X_test, y_test), 10
+    return (X_train, y_train), (X_test, y_test), 10
 
 
-def load_cifar10(path=".", normalize=True):
+def _compute_zca_transform(imgs, filter_bias=0.1):
+    """
+    Compute the zca whitening transform matrix
+    """
+    logger.info("Computing ZCA transform matrix")
+    meanX = np.mean(imgs, 0)
+
+    covX = np.cov(imgs.T)
+    D, E = np.linalg.eigh(covX)
+
+    assert not np.isnan(D).any()
+    assert not np.isnan(E).any()
+    assert D.min() > 0
+
+    D = D ** -.5
+
+    W = np.dot(E, np.dot(np.diag(D), E.T))
+    return meanX, W
+
+
+def zca_whiten(train, test, cache=None):
+    """
+    Use train set statistics to apply the ZCA whitening transform to
+    both train and test sets.
+    """
+    if cache and os.path.isfile(cache):
+        with open(cache, 'rb') as f:
+            (meanX, W) = cPickle.load(f)
+    else:
+        meanX, W = _compute_zca_transform(train)
+        if cache:
+            logger.info("Caching ZCA transform matrix")
+            with open(cache, 'wb') as f:
+                cPickle.dump((meanX, W), f)
+
+    logger.info("Applying ZCA whitening transform")
+    train_w = np.dot(train - meanX, W)
+    test_w = np.dot(test - meanX, W)
+
+    return train_w, test_w
+
+
+def global_contrast_normalize(X, scale=1., min_divisor=1e-8):
+    """
+    Subtract mean and normalize by vector norm
+    """
+
+    X = X - X.mean(axis=1)[:, np.newaxis]
+
+    normalizers = np.sqrt((X ** 2).sum(axis=1)) / scale
+    normalizers[normalizers < min_divisor] = 1.
+
+    X /= normalizers[:, np.newaxis]
+
+    return X
+
+
+def load_cifar10(path=".", normalize=True, contrast_normalize=False, whiten=False):
     """
     Fetch the CIFAR-10 dataset and load it into memory.
 
@@ -140,7 +197,7 @@ def load_cifar10(path=".", normalize=True):
     cifar = dataset_meta['cifar-10']
     workdir, filepath = _valid_path_append(path, '', cifar['file'])
     batchdir = os.path.join(workdir, 'cifar-10-batches-py')
-    if not os.path.isdir(os.path.join(batchdir, 'data_batch_1')):
+    if not os.path.exists(os.path.join(batchdir, 'data_batch_1')):
         if not os.path.exists(filepath):
             fetch_dataset(cifar['url'], cifar['file'], filepath, cifar['size'])
         with tarfile.open(filepath, 'r:gz') as f:
@@ -164,11 +221,49 @@ def load_cifar10(path=".", normalize=True):
     y_train = y_train.reshape(-1, 1)
     y_test = np.array(y_test).reshape(-1, 1)
 
+    if contrast_normalize:
+        norm_scale = 55.0  # Goodfellow
+        X_train = global_contrast_normalize(X_train, scale=norm_scale)
+        X_test = global_contrast_normalize(X_test, scale=norm_scale)
+
     if normalize:
         X_train = X_train / 255.
         X_test = X_test / 255.
 
+    if whiten:
+        zca_cache = os.path.join(workdir, 'cifar-10-zca-cache.pkl')
+        X_train, X_test = zca_whiten(X_train, X_test, cache=zca_cache)
+
     return (X_train, y_train), (X_test, y_test), 10
+
+
+def load_babi(path=".", task='qa1_single-supporting-fact', subset='en'):
+    """
+    Fetch the Facebook bAbI dataset and load it to memory.
+
+    Args:
+        path (str, optional): Local directory in which to cache the raw
+                              dataset.  Defaults to current directory.
+        task (str): bAbI task to load
+
+    Returns:
+        tuple: training and test files are returned
+    """
+    babi = dataset_meta['babi']
+    workdir, filepath = _valid_path_append(path, '', babi['file'])
+    if not os.path.exists(filepath):
+        fetch_dataset(babi['url'], babi['file'], filepath, babi['size'])
+
+    babi_dir_name = babi['file'].split('.')[0]
+    task = babi_dir_name + '/' + subset + '/' + task + '_{}.txt'
+    train_file = os.path.join(workdir, task.format('train'))
+    test_file = os.path.join(workdir, task.format('test'))
+
+    if os.path.exists(train_file) is False or os.path.exists(test_file):
+        with tarfile.open(filepath, 'r:gz') as f:
+            f.extractall(workdir)
+
+    return train_file, test_file
 
 
 def load_text(dataset, path="."):
@@ -253,6 +348,12 @@ dataset_meta = {
         'file': 'cifar-10-python.tar.gz',
         'url': 'http://www.cs.toronto.edu/~kriz',
         'func': load_cifar10
+    },
+    'babi': {
+        'size': 11745123,
+        'file': 'tasks_1-20_v1-2.tar.gz',
+        'url': 'http://www.thespermwhale.com/jaseweston/babi',
+        'func': load_babi
     },
     'ptb-train': {
         'size': 5101618,

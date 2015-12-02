@@ -21,6 +21,8 @@ def get_steps(x, shape):
     into a [(vocab_size, batch_size)] * steps list of views
     """
     steps = shape[1]
+    if x is None:
+        return [None for step in range(steps)]
     xs = x.reshape(shape + (-1,))
     return [xs[:, step, :] for step in range(steps)]
 
@@ -32,7 +34,13 @@ class Recurrent(ParameterLayer):
 
     Arguments:
         output_size (int): Number of hidden/output units
-        init (Initializer): Function for initializing the model parameters
+        init (Initializer): Function for initializing the model's input to hidden weights.  By
+                            default, this initializer will also be used for recurrent parameters
+                            unless init_inner is also specified.  Biases will always be
+                            initialized to zero.
+        init_inner (Initializer, optional): Function for initializing the model's recurrent
+                                            parameters.  If absent, will default to using same
+                                            initializer provided to init.
         activation (Transform): Activation function for the input modulation
 
     Attributes:
@@ -43,7 +51,7 @@ class Recurrent(ParameterLayer):
         b (Tensor): Biases on output units (output_size, 1)
     """
 
-    def __init__(self, output_size, init, activation,
+    def __init__(self, output_size, init, init_inner=None, activation=None,
                  reset_cells=False, name="RecurrentLayer"):
         super(Recurrent, self).__init__(init, name)
         self.x = None
@@ -51,10 +59,11 @@ class Recurrent(ParameterLayer):
         self.nout = output_size
         self.h_nout = output_size
         self.activation = activation
-        self.h_buffer = None
+        self.outputs = None
         self.W_input = None
         self.ngates = 1
         self.reset_cells = reset_cells
+        self.init_inner = init_inner
 
     def configure(self, in_obj):
         super(Recurrent, self).configure(in_obj)
@@ -65,20 +74,21 @@ class Recurrent(ParameterLayer):
             self.weight_shape = (self.nout, self.nin)
         return self
 
-    def allocate(self, shared_outputs=None, shared_deltas=None):
-        super(Recurrent, self).allocate(shared_outputs, shared_deltas)
-        self.h_buffer = self.outputs
-        self.out_deltas_buffer = self.deltas
-
-        self.h = get_steps(self.h_buffer, self.out_shape)
+    def allocate(self, shared_outputs=None):
+        super(Recurrent, self).allocate(shared_outputs)
+        self.h = get_steps(self.outputs, self.out_shape)
         self.h_prev = self.h[-1:] + self.h[:-1]
-        self.out_delta = get_steps(self.out_deltas_buffer, self.in_shape)
         # State deltas
         self.h_delta = get_steps(self.be.iobuf(self.out_shape), self.out_shape)
-        self.bufs_to_reset = [self.h_buffer]
+        self.bufs_to_reset = [self.outputs]
 
         if self.W_input is None:
             self.init_params(self.weight_shape)
+
+    def set_deltas(self, delta_buffers):
+        super(Recurrent, self).set_deltas(delta_buffers)
+        self.out_deltas_buffer = self.deltas
+        self.out_delta = get_steps(self.out_deltas_buffer, self.in_shape)
 
     def init_buffers(self, inputs):
         """
@@ -101,11 +111,9 @@ class Recurrent(ParameterLayer):
 
     def init_params(self, shape):
         """
-        Initialize params for LSTM including weights and biases.
+        Initialize params including weights and biases.
         The weight matrix and bias matrix are concatenated from the weights
         for inputs and weights for recurrent inputs and bias.
-        The shape of the weights are (number of inputs + number of outputs +1 )
-        by (number of outputs * 4)
 
         Arguments:
             shape (Tuple): contains number of outputs and number of inputs
@@ -113,11 +121,12 @@ class Recurrent(ParameterLayer):
         """
         (nout, nin) = shape
         g_nout = self.ngates * nout
-        # Weights: input, recurrent, bias
+        doFill = False
+
         if self.W is None:
             self.W = self.be.empty((nout + nin + 1, g_nout))
             self.dW = self.be.zeros_like(self.W)
-            self.init.fill(self.W)
+            doFill = True
         else:
             # Deserialized weights and empty grad
             assert self.W.shape == (nout + nin + 1, g_nout)
@@ -126,6 +135,19 @@ class Recurrent(ParameterLayer):
         self.W_input = self.W[:nin].reshape((g_nout, nin))
         self.W_recur = self.W[nin:-1].reshape((g_nout, nout))
         self.b = self.W[-1:].reshape((g_nout, 1))
+
+        if doFill:
+            gatelist = [g * nout for g in range(0, self.ngates + 1)]
+            for wtnm in ('W_input', 'W_recur'):
+                wtmat = getattr(self, wtnm)
+                if wtnm is 'W_recur' and self.init_inner is not None:
+                    initfunc = self.init_inner
+                else:
+                    initfunc = self.init
+
+                for gb, ge in zip(gatelist[:-1], gatelist[1:]):
+                    initfunc.fill(wtmat[gb:ge])
+            self.b.fill(0.)
 
         self.dW_input = self.dW[:nin].reshape(self.W_input.shape)
         self.dW_recur = self.dW[nin:-1].reshape(self.W_recur.shape)
@@ -168,9 +190,9 @@ class Recurrent(ParameterLayer):
             self.be.compound_dot(self.W_recur, h_prev, h, beta=1.0)
             h[:] = self.activation(h + self.b)
 
-        return self.h_buffer
+        return self.outputs
 
-    def bprop(self, deltas, do_acts=True):
+    def bprop(self, deltas, alpha=1.0, beta=0.0):
         """
         Backward propagation of errors through recurrent layer.
 
@@ -204,8 +226,8 @@ class Recurrent(ParameterLayer):
             self.be.compound_dot(in_deltas, xs.T, self.dW_input, beta=1.0)
             self.db[:] = self.db + self.be.sum(in_deltas, axis=1)
             # save a bit of computation if not bpropping activation gradients
-            if do_acts:
-                self.be.compound_dot(self.W_input.T, in_deltas, out_delta)
+            if out_delta:
+                self.be.compound_dot(self.W_input.T, in_deltas, out_delta, alpha=alpha, beta=beta)
 
         return self.out_deltas_buffer
 
@@ -218,7 +240,13 @@ class LSTM(Recurrent):
 
     Arguments:
         output_size (int): Number of hidden/output units
-        init (Initializer): Function for initializing the model parameters
+        init (Initializer): Function for initializing the model's input to hidden weights.  By
+                            default, this initializer will also be used for recurrent parameters
+                            unless init_inner is also specified.  Biases will always be
+                            initialized to zero.
+        init_inner (Initializer, optional): Function for initializing the model's recurrent
+                                            parameters.  If absent, will default to using same
+                                            initializer provided to init.
         activation (Transform): Activation function for the input modulation
         gate_activation (Transform): Activation function for the gates
 
@@ -231,15 +259,15 @@ class LSTM(Recurrent):
             (out size * 4, out size)
         b (Tensor): Biases (out size * 4 , 1)
     """
-    def __init__(self, output_size, init, activation, gate_activation,
-                 reset_cells=False, name="LstmLayer"):
-        super(LSTM, self).__init__(output_size, init, activation, name)
+    def __init__(self, output_size, init, init_inner=None, activation=None,
+                 gate_activation=None, reset_cells=False, name="LstmLayer"):
+        super(LSTM, self).__init__(output_size, init, init_inner,
+                                   activation, reset_cells, name)
         self.gate_activation = gate_activation
         self.ngates = 4  # Input, Output, Forget, Cell
-        self.reset_cells = reset_cells
 
-    def allocate(self, shared_outputs=None, shared_deltas=None):
-        super(LSTM, self).allocate(shared_outputs, shared_deltas)
+    def allocate(self, shared_outputs=None):
+        super(LSTM, self).allocate(shared_outputs)
         # indices for slicing gate buffers
         (ifo1, ifo2) = (0, self.nout * 3)
         (i1, i2) = (0, self.nout)
@@ -313,9 +341,9 @@ class LSTM(Recurrent):
             c_act[:] = self.activation(c)
             h[:] = o * c_act
 
-        return self.h_buffer
+        return self.outputs
 
-    def bprop(self, deltas, do_acts=True):
+    def bprop(self, deltas, alpha=1.0, beta=0.0):
         """
         Backpropagation of errors, output delta for previous layer, and
         calculate the update on model parmas
@@ -342,7 +370,7 @@ class LSTM(Recurrent):
             self.in_deltas = get_steps(deltas, self.out_shape)
             self.prev_in_deltas = self.in_deltas[-1:] + self.in_deltas[:-1]
             self.ifog_delta_last_steps = self.ifog_delta_buffer[:, self.be.bsz:]
-            self.h_first_steps = self.h_buffer[:, :-self.be.bsz]
+            self.h_first_steps = self.outputs[:, :-self.be.bsz]
 
         params = (self.h_delta, self.in_deltas, self.prev_in_deltas,
                   self.i, self.f, self.o, self.g, self.ifog_delta,
@@ -376,8 +404,9 @@ class LSTM(Recurrent):
         self.db[:] = self.be.sum(self.ifog_delta_buffer, axis=1)
 
         # out deltas
-        if do_acts:  # save a bit of computation
-            self.be.compound_dot(self.W_input.T, self.ifog_delta_buffer, self.out_deltas_buffer)
+        if self.out_deltas_buffer:  # save a bit of computation
+            self.be.compound_dot(self.W_input.T, self.ifog_delta_buffer, self.out_deltas_buffer,
+                                 alpha=alpha, beta=beta)
 
         return self.out_deltas_buffer
 
@@ -389,8 +418,7 @@ class GRU(Recurrent):
 
     - It uses two gates: reset gate (r) and update gate (z)
     - The update gate (z) decides how much the activation is updated
-    - The reset gate (r) decides how much to reset (when r = 0) from the previous
-        activation
+    - The reset gate (r) decides how much to reset (when r = 0) from the previous activation
     - Activation (h_t) is a linear interpolation (by z) between the previous
         activation (h_t-1) and the new candidate activation ( h_can )
     - r and z are compuated the same way, using different weights
@@ -401,7 +429,13 @@ class GRU(Recurrent):
 
     Arguments:
         output_size (int): Number of hidden/output units
-        init (Initializer): Function for initializing the model parameters
+        init (Initializer): Function for initializing the model's input to hidden weights.  By
+                            default, this initializer will also be used for recurrent parameters
+                            unless init_inner is also specified.  Biases will always be
+                            initialized to zero.
+        init_inner (Initializer, optional): Function for initializing the model's recurrent
+                                            parameters.  If absent, will default to using same
+                                            initializer provided to init.
         activation (Transform): Activiation function for the input modulation
         gate_activation (Transform): Activation function for the gates
 
@@ -424,13 +458,15 @@ class GRU(Recurrent):
     .. _[Chung2014]: http://arxiv.org/pdf/1412.3555v1.pdf
     """
 
-    def __init__(self, output_size, init, activation, gate_activation, name="GruLayer"):
-        super(GRU, self).__init__(output_size, init, activation, name)
+    def __init__(self, output_size, init, init_inner=None, activation=None,
+                 gate_activation=None, reset_cells=False, name="GruLayer"):
+        super(GRU, self).__init__(output_size, init, init_inner,
+                                  activation, reset_cells, name)
         self.gate_activation = gate_activation
         self.ngates = 3  # r, z, hcandidate
 
-    def allocate(self, shared_outputs=None, shared_deltas=None):
-        super(GRU, self).allocate(shared_outputs, shared_deltas)
+    def allocate(self, shared_outputs=None):
+        super(GRU, self).allocate(shared_outputs)
         self.h_prev_bprop = [0] + self.h[:-1]
 
         # indices for slicing gate buffers
@@ -498,18 +534,21 @@ class GRU(Recurrent):
 
     def fprop(self, inputs, inference=False):
         """
-        Apply the forward pass transformation to the input data.  The input
-            data is a list of inputs with an element for each time step of
-            model unrolling.
+        Apply the forward pass transformation to the input data.  The input data is a list of
+            inputs with an element for each time step of model unrolling.
 
         Arguments:
-            inputs (Tensor): input data as 3D tensors, then being converted
-                             into a list of 2D tensors
+            inputs (Tensor): input data as 3D tensors, then converted into a list of 2D tensors
 
         Returns:
             Tensor: GRU output for each model time step
         """
         self.init_buffers(inputs)
+
+        if self.reset_cells:
+            self.h[-1][:] = 0
+            self.rz[-1][:] = 0
+            self.hcan[-1][:] = 0
 
         for (h, h_prev, rh_prev, xs, rz, r, z, hcan, rz_rec, hcan_rec, rzhcan) in zip(
                 self.h, self.h_prev, self.rh_prev, self.xs, self.rz, self.r,
@@ -527,12 +566,12 @@ class GRU(Recurrent):
             hcan[:] = self.activation(hcan_rec + hcan + self.b_hcan)
             h[:] = (1 - z) * h_prev + z * hcan
 
-        return self.h_buffer
+        return self.outputs
 
-    def bprop(self, deltas, do_acts=True):
+    def bprop(self, deltas, alpha=1.0, beta=0.0):
         """
-        Backpropogation of errors, output delta for previous layer, and
-        calculate the update on model parmas
+        Backpropagation of errors, output delta for previous layer, and calculate the update on
+            model parmas
 
         Arguments:
             deltas (Tensor): error tensors for each time step of unrolling
@@ -544,8 +583,7 @@ class GRU(Recurrent):
             db (Tensor): bias gradients
 
         Returns:
-            Tensor: Backpropograted errors for each time step
-                of model unrolling
+            Tensor: Backpropagated errors for each time step of model unrolling
         """
 
         self.dW[:] = 0
@@ -586,8 +624,9 @@ class GRU(Recurrent):
         self.db[:] = self.be.sum(self.rzhcan_delta_buffer, axis=1)
 
         # out deltas
-        if do_acts:  # save a bit of computation
-            self.be.compound_dot(self.W_input.T, self.rzhcan_delta_buffer, self.out_deltas_buffer)
+        if self.out_deltas_buffer:  # save a bit of computation
+            self.be.compound_dot(self.W_input.T, self.rzhcan_delta_buffer, self.out_deltas_buffer,
+                                 alpha=alpha, beta=beta)
 
         return self.out_deltas_buffer
 
@@ -604,8 +643,15 @@ class RecurrentOutput(Layer):
 
     """
 
-    def __init__(self, name="RecurrentOutputLayer"):
+    def __init__(self, name=None):
+        name = name if name else self.classnm
         super(RecurrentOutput, self).__init__(name)
+        self.owns_output = self.owns_delta = True
+        self.x = None
+
+    def __str__(self):
+        return "RecurrentOutput choice %s : (%d, %d) inputs, %d outputs" % (
+            self.name, self.nin, self.nsteps, self.nin)
 
     def configure(self, in_obj):
         super(RecurrentOutput, self).configure(in_obj)  # gives self.in_shape
@@ -613,13 +659,29 @@ class RecurrentOutput(Layer):
         self.out_shape = (self.nin, 1)
         return self
 
-    def allocate(self, shared_outputs=None, shared_deltas=None):
-        self.outputs = self.be.iobuf(self.out_shape)
-        self.deltas_buffer = self.be.iobuf(self.in_shape)
-        self.bsz = self.be.bsz
-        self.deltas = [self.deltas_buffer[
-            :, step*self.bsz:(step+1)*self.bsz] for step in range(self.nsteps)]
-        self.deltas_last = self.deltas_buffer[:, -self.be.bsz:]
+    def set_deltas(self, delta_buffers):
+        super(RecurrentOutput, self).set_deltas(delta_buffers)
+        self.deltas_buffer = self.deltas
+        if self.deltas:
+            self.deltas = get_steps(self.deltas_buffer, self.in_shape)
+        else:
+            self.deltas = []  # for simplifying bprop notation
+
+    def init_buffers(self, inputs):
+        """
+        Initialize buffers for recurrent internal units and outputs.
+        Buffers are initialized as 2D tensors with second dimension being steps * batch_size
+        A list of views are created on the buffer for easy manipulation of data
+        related to a certain time step
+
+        Arguments:
+            inputs (Tensor): input data as 2D tensor. The dimension is
+                             (input_size, sequence_length * batch_size)
+
+        """
+        if self.x is None or self.x is not inputs:
+            self.x = inputs
+            self.xs = get_steps(inputs, self.in_shape)
 
 
 class RecurrentSum(RecurrentOutput):
@@ -627,54 +689,33 @@ class RecurrentSum(RecurrentOutput):
     """
     A layer that sums over the recurrent layer outputs over time
     """
-
-    def __init__(self, name="RecurrentSumLayer"):
-        super(RecurrentSum, self).__init__(name)
-
-    def __str__(self):
-        return "RecurrentOutput choice %s : (%d, %d) inputs, %d outputs" % (
-            self.name, self.nin, self.nsteps, self.nin)
+    def configure(self, in_obj):
+        super(RecurrentSum, self).configure(in_obj)  # gives self.in_shape
+        self.sumscale = 1.
+        return self
 
     def fprop(self, inputs, inference=False):
+        self.init_buffers(inputs)
         self.outputs.fill(0)
-        for step in range(self.nsteps):
-            self.outputs[:] = self.outputs + \
-                inputs[:, step*self.bsz:(step+1)*self.bsz]
+        for x in self.xs:
+            self.outputs[:] = self.outputs + self.sumscale * x
         return self.outputs
 
-    def bprop(self, error, do_acts=True):
-        if do_acts:
-            for delta_step in self.deltas:
-                delta_step[:] = error
+    def bprop(self, error, alpha=1.0, beta=0.0):
+        for delta in self.deltas:
+            delta[:] = alpha * self.sumscale * error + delta * beta
         return self.deltas_buffer
 
 
-class RecurrentMean(RecurrentOutput):
+class RecurrentMean(RecurrentSum):
 
     """
     A layer that gets the averaged recurrent layer outputs over time
     """
-
-    def __init__(self, name="RecurrentMeanLayer"):
-        super(RecurrentMean, self).__init__(name)
-
-    def __str__(self):
-        return "RecurrentOutput choice %s : (%d, %d) inputs, %d outputs" % (
-            self.name, self.nin, self.nsteps, self.nin)
-
-    def fprop(self, inputs, inference=False):
-        self.outputs.fill(0)
-        for step in range(self.nsteps):
-            self.outputs[:] = self.outputs + \
-                inputs[:, step*self.bsz:(step+1)*self.bsz]
-        self.outputs[:] = 1. / self.nsteps * self.outputs
-        return self.outputs
-
-    def bprop(self, error, do_acts=True):
-        if do_acts:
-            for delta_step in self.deltas:
-                delta_step[:] = 1. / self.nsteps * error
-        return self.deltas_buffer
+    def configure(self, in_obj):
+        super(RecurrentMean, self).configure(in_obj)  # gives self.in_shape
+        self.sumscale = 1. / self.nsteps
+        return self
 
 
 class RecurrentLast(RecurrentOutput):
@@ -683,21 +724,15 @@ class RecurrentLast(RecurrentOutput):
     A layer that only keeps the recurrent layer output at the last time step
     """
 
-    def __init__(self, name="RecurrentLastLayer"):
-        super(RecurrentLast, self).__init__(name)
-
-    def __str__(self):
-        return "RecurrentOutput choice %s : (%d, %d) inputs, %d outputs" % (
-            self.name, self.nin, self.nsteps, self.nin)
-
     def fprop(self, inputs, inference=False):
-        self.outputs[:] = inputs[:, -self.bsz:]
+        self.init_buffers(inputs)
+        self.outputs[:] = self.xs[-1]
         return self.outputs
 
-    def bprop(self, error, do_acts=True):
-        if do_acts:
-            # RNN/LSTM layers doesnot allocate new hidden units delta buffers and they overwrite it
+    def bprop(self, error, alpha=1.0, beta=0.0):
+        if self.deltas:
+            # RNN/LSTM layers don't allocate new hidden units delta buffers and they overwrite it
             # while doing bprop. So, init with zeros here.
             self.deltas_buffer.fill(0)
-            self.deltas_last[:] = error
+            self.deltas[-1][:] = alpha * error
         return self.deltas_buffer

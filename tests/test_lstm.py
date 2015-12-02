@@ -112,7 +112,9 @@ def check_lstm(seq_len, input_size, hidden_size,
     inpa = lstm.be.array(inp)
     # run neon fprop
     lstm.configure((input_size, seq_len))
+    lstm.prev_layer = True  # Hack to force allocating a delta buffer
     lstm.allocate()
+    lstm.set_deltas([lstm.be.iobuf(lstm.in_shape)])
     lstm.fprop(inpa)
 
     # reference numpy LSTM
@@ -148,7 +150,7 @@ def check_lstm(seq_len, input_size, hidden_size,
                       atol=1.0e-5)
 
     print '====Verifying hidden states===='
-    allclose_with_out(lstm.h_buffer.get(),
+    allclose_with_out(lstm.outputs.get(),
                       Hout_ref,
                       rtol=0.0,
                       atol=1.0e-5)
@@ -165,7 +167,6 @@ def check_lstm(seq_len, input_size, hidden_size,
     dWrecur_neon = lstm.dW_recur.get()
     db_neon = lstm.db.get()
 
-    # import pdb; pdb.set_trace()
     deltas_ref = deltas.copy().T.reshape(seq_len, batch_size, hidden_size)
     (dX_ref, dWLSTM_ref, dc0_ref, dh0_ref) = lstm_ref.backward(deltas_ref,
                                                                batch_cache)
@@ -213,7 +214,7 @@ def reset_lstm(lstm):
     # cleared
     lstm.x = None
     lstm.xs = None  # just in case
-    lstm.h_buffer = None
+    lstm.outputs = None
     return
 
 
@@ -351,12 +352,14 @@ def gradient_calc(seq_len, input_size, hidden_size, batch_size,
         inp_bl = np.random.randn(*input_shape)
 
     # neon lstm instance
-    lstm = LSTM(hidden_size, Gaussian(), Tanh(), Logistic())
+    lstm = LSTM(hidden_size, Gaussian(), activation=Tanh(), gate_activation=Logistic())
     inpa = lstm.be.array(np.copy(inp_bl))
 
     # run fprop on the baseline input
     lstm.configure((input_size, seq_len))
+    lstm.prev_layer = True  # Hack to force allocating a delta buffer
     lstm.allocate()
+    lstm.set_deltas([lstm.be.iobuf(lstm.in_shape)])
     out_bl = lstm.fprop(inpa).get()
 
     # random scaling/hash to generate fake loss

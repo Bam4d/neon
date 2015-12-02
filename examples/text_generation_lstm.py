@@ -33,30 +33,30 @@ from neon.models import Model
 from neon.optimizers import RMSProp
 from neon.transforms import Logistic, Tanh, Softmax, CrossEntropyMulti
 from neon.callbacks.callbacks import Callbacks
-from neon.util.argparser import NeonArgparser
+from neon.util.argparser import NeonArgparser, extract_valid_args
 
 # parse the command line arguments
 parser = NeonArgparser(__doc__)
-args = parser.parse_args()
-
-batch_size = 64
-num_epochs = args.epochs
+args = parser.parse_args(gen_be=False)
 
 # Override save path if None
 if args.save_path is None:
     args.save_path = 'rnn_text_gen.pickle'
 
+if args.callback_args['save_path'] is None:
+    args.callback_args['save_path'] = args.save_path
+
+if args.callback_args['serialize'] is None:
+    args.callback_args['serialize'] = 1
+
 # hyperparameters
+args.batch_size = 64
 time_steps = 64
 hidden_size = 512
-clip_gradients = True
+gradient_clip_value = 5
 
 # setup backend
-be = gen_backend(backend=args.backend,
-                 batch_size=batch_size,
-                 rng_seed=args.rng_seed,
-                 device_id=args.device_id,
-                 default_dtype=args.datatype)
+be = gen_backend(**extract_valid_args(args, gen_backend))
 
 # download shakespeare text
 data_path = load_text('shakespeare', path=args.data_dir)
@@ -71,24 +71,20 @@ init = Uniform(low=-0.08, high=0.08)
 
 # model initialization
 layers = [
-    LSTM(hidden_size, init, Logistic(), Tanh()),
+    LSTM(hidden_size, init, activation=Logistic(), gate_activation=Tanh()),
     Affine(len(train_set.vocab), init, bias=init, activation=Softmax())
 ]
 model = Model(layers=layers)
 
 cost = GeneralizedCost(costfunc=CrossEntropyMulti(usebits=True))
 
-optimizer = RMSProp(clip_gradients=clip_gradients, stochastic_round=args.rounding)
+optimizer = RMSProp(gradient_clip_value=gradient_clip_value, stochastic_round=args.rounding)
 
 # configure callbacks
-callbacks = Callbacks(model, train_set, output_file=args.output_file,
-                      progress_bar=args.progress_bar,
-                      valid_set=valid_set, valid_freq=1,
-                      )
-callbacks.add_serialize_callback(1, args.save_path)
+callbacks = Callbacks(model, train_set, eval_set=valid_set, **args.callback_args)
 
 # fit and validate
-model.fit(train_set, optimizer=optimizer, num_epochs=num_epochs, cost=cost, callbacks=callbacks)
+model.fit(train_set, optimizer=optimizer, num_epochs=args.epochs, cost=cost, callbacks=callbacks)
 
 
 def sample(prob):
@@ -104,7 +100,7 @@ time_steps = 1
 num_predict = 1000
 
 layers = [
-    LSTM(hidden_size, init, Logistic(), Tanh()),
+    LSTM(hidden_size, init, activation=Logistic(), gate_activation=Tanh()),
     Affine(len(train_set.vocab), init, bias=init, activation=Softmax())
 ]
 model_new = Model(layers=layers)

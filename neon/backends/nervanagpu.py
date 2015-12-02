@@ -29,6 +29,7 @@ from math import log
 from neon.backends import kernel_specs
 from neon.backends.backend import Tensor, Backend, OpTreeNode, OpCollection
 from neon.backends.layer_gpu import ConvLayer, DeconvLayer, PoolLayer, _get_sm_count
+from neon.backends.kernels.cuda import pooling
 
 _none_slice = slice(None, None, None)
 
@@ -457,12 +458,12 @@ class GPUTensor(Tensor):
         if len(shape) < self._min_dims:
             shape = shape + (1, )
 
-        if shape == self.shape:
-            return self
-
         if -1 in shape:
             missing_dim = -self.size / np.prod(shape)
             shape = tuple([missing_dim if x == -1 else x for x in shape])
+
+        if shape == self.shape:
+            return self
 
         size = np.prod(shape)
 
@@ -538,12 +539,14 @@ class GPUTensor(Tensor):
         else:
             dtype = np.dtype(dtype)
 
+        new_base = self if self.base is None else self.base
+
         return self.__class__(
             backend=self.backend,
             shape=shape,
             dtype=dtype,
             allocator=self.allocator,
-            base=self,
+            base=new_base,
             gpudata=self.gpudata,
             strides=_contiguous_strides(shape),
             name=name,
@@ -669,6 +672,7 @@ class NervanaGPU(Backend):
 
         # context
         drv.init()
+        self.device_type = 1
         self.device_id = device_id if device_id is not None else 0
         self.ctx = drv.Device(device_id).make_context()
 
@@ -696,7 +700,7 @@ class NervanaGPU(Backend):
         self.hist_offset = hist_offset
         self.hist_map = dict()
         self.hist_idx = 0
-        self.hist_max = 4096
+        self.hist_max = 4*4096
         self.hist_base = drv.mem_alloc(self.hist_bins * self.hist_max * 4)
         drv.memset_d32(self.hist_base, 0, self.hist_bins * self.hist_max)
 
@@ -987,7 +991,7 @@ class NervanaGPU(Backend):
         return stacks[-1][0]  # TODO: to be removed, used in partial
 
     def empty(self, shape, dtype=None, name=None, persist_values=True,
-              allocator=drv.mem_alloc):
+              parallel=False, distributed=False, allocator=drv.mem_alloc):
         """
         Allocate the space for a GPUTensor
         """
@@ -997,7 +1001,7 @@ class NervanaGPU(Backend):
                          rounding=self.round_mode)
 
     def array(self, ary, dtype=None, name=None, persist_values=True,
-              allocator=drv.mem_alloc):
+              parallel=False, distributed=False, allocator=drv.mem_alloc):
         """
         converts a numpy array to a GPUTensor
         """
@@ -1009,7 +1013,7 @@ class NervanaGPU(Backend):
                          rounding=self.round_mode).set(ary)
 
     def zeros(self, shape, dtype=None, name=None, persist_values=True,
-              allocator=drv.mem_alloc):
+              parallel=False, distributed=False, allocator=drv.mem_alloc):
         """
         Returns an array of the given shape and dtype filled with 0's.
         """
@@ -1019,7 +1023,7 @@ class NervanaGPU(Backend):
                          rounding=self.round_mode)._assign(0)
 
     def ones(self, shape, dtype=None, name=None, persist_values=True,
-             allocator=drv.mem_alloc):
+             parallel=False, distributed=False, allocator=drv.mem_alloc):
         """
         Returns an array of the given shape and dtype filled with 1's.
         """
@@ -1492,7 +1496,9 @@ class NervanaGPU(Backend):
             if zero:
                 shuffle_kernel = _get_transpose_kernel(B.dtype.str[1:])
                 if beta:
-                    raise ValueError("beta not yet supported in this bprop kernel variant.")
+                    zero = False # let atomic adds accumulate on top
+                    if beta != 1.0:
+                        C[:] = C * beta # pre-apply beta
             else:
                 shuffle_kernel = _get_shuffle_kernel(B.dtype.str[1:])
             shuffle_args = [layer.shuffle_grid, layer.shuffle_block, self.stream,
@@ -1630,34 +1636,36 @@ class NervanaGPU(Backend):
         return PoolLayer(self, dtype, op, N, C, D, H, W, J, T, R, S,
                          pad_c, pad_d, pad_h, pad_w, str_c, str_d, str_h, str_w)
 
-    def fprop_pool(self, layer, I, O, repeat=1):
+    def fprop_pool(self, layer, I, O, argmax=None, alpha=1.0, beta=0.0, repeat=1):
 
         assert layer.sizeI == I.size
         assert layer.sizeO == O.size
+        if layer.op == "max":
+            assert argmax is not None, "max pooling requires argmax buffer"
+        return self._execute_pool(layer, I, O, argmax, alpha, beta, layer.fprop_kernel,
+                                  layer.fprop_lut_size, repeat)
 
-        return self._execute_pool(layer, I, O, None, layer.fprop_kernel, layer.fprop_lut_size,
-                                  0, repeat)
+    def bprop_pool(self, layer, I, O, argmax=None, alpha=1.0, beta=0.0, repeat=1):
 
-    def bprop_pool(self, layer, I, E, grad_I, repeat=1):
+        assert layer.sizeI == O.size, "missmatch between sizeI %d and O %d" % (layer.sizeI, O.size)
+        assert layer.sizeO == I.size, "missmatch between sizeO %d and I %d" % (layer.sizeO, I.size)
+        if layer.op == "max":
+            assert argmax is not None, "max pooling requires argmax buffer"
+        if argmax is not None:
+            assert layer.sizeO == argmax.size, "Pooling argmax size does not match input size!"
+        assert I.dtype == O.dtype
+        return self._execute_pool(layer, I, O, argmax, alpha, beta, layer.bprop_kernel,
+                                  layer.bprop_lut_size, repeat)
 
-        assert layer.sizeI == I.size
-        assert layer.sizeO == E.size
-        assert layer.sizeI == grad_I.size
-        assert I.dtype == grad_I.dtype
-
-        return self._execute_pool(layer, I, E, grad_I, layer.bprop_kernel, layer.bprop_lut_size,
-                                  1, repeat)
-
-    def _execute_pool(self, layer, I, O, B, kernel_args, shared, b_mode, repeat):
+    def _execute_pool(self, layer, I, O, argmax, alpha, beta, kernel_args, shared, repeat):
 
         assert I.dtype == O.dtype
-
-        B_data = B.gpudata if b_mode else 0
-        kernel = kernel_specs.get_kernel(kernel_args[0])
+        A_data = argmax.gpudata if argmax is not None else 0
+        kernel = pooling.map_string2func(kernel_args[0], layer.dtype.str[1:])
+        flags = 0
         params = [kernel_args[1], kernel_args[2], self.stream,
-                  O.gpudata, B_data, I.gpudata, b_mode]
-
-        params.extend(kernel_args[4])
+                  I.gpudata, O.gpudata, A_data, alpha, beta, flags]
+        params.extend(kernel_args[3])
 
         # Warmup
         if repeat > 1:
@@ -1669,9 +1677,6 @@ class NervanaGPU(Backend):
             start.record(self.stream)
 
         for r in range(repeat):
-            if b_mode and kernel_args[3]:
-                drv.memset_d8_async(B_data, 0, B.nbytes, self.stream)
-
             kernel.prepared_async_call(*params, shared_size=shared)
 
         if self.bench or repeat > 1:
@@ -1786,6 +1791,39 @@ class NervanaGPU(Backend):
             occup = blocks * threads / (128.0 * _get_sm_count())
             print("%7.3f msecs %4.0f GBps %s(%d,%d,%d) %.1f" %
                   (msecs, bandwidth, kernel.name, blocks, N, threads, occup))
+
+    def init_mark(self):
+        """
+        Generate a timing mark object
+
+        Returns:
+            timing mark (pycude driver event)
+        """
+        return drv.Event()
+
+    def record_mark(self, marker):
+        """
+        Mark the current time
+
+        Arguments:
+            marker (time mark): timing mark generated by init_mark()
+        """
+        marker.record()
+
+    def get_time(self, start, end):
+        """
+        Return time between start and end marks
+
+        Arguments:
+            start (time maker): start time mark
+
+            end (time marker): end time mark
+
+        Returns:
+            time elapsed between start and end time marks in milliseconds
+        """
+        end.synchronize()
+        return end.time_since(start)
 
 
 # Note the strides computed here do not include the dtype.itemsize

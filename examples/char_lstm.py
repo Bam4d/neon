@@ -31,36 +31,27 @@ from neon.models import Model
 from neon.optimizers import RMSProp
 from neon.transforms import Logistic, Tanh, Softmax, CrossEntropyMulti
 from neon.callbacks.callbacks import Callbacks
-from neon.util.argparser import NeonArgparser
+from neon.util.argparser import NeonArgparser, extract_valid_args
 
 # parse the command line arguments
 parser = NeonArgparser(__doc__)
-args = parser.parse_args()
-
-
-batch_size = 64 #50
-num_epochs = args.epochs
-
-# Set the type of layer to use {lstm|gru}
-rlayer_type = "lstm"
+parser.add_argument('--rlayer_type', default='lstm', choices=['gru', 'lstm'],
+                    help='type of recurrent layer to use (gru or lstm)')
+args = parser.parse_args(gen_be=False)
 
 # hyperparameters
-time_steps = 50
+args.batch_size = 64  # note Karpathy's char-rnn uses 50
+time_steps = 40  # note Karpathy's char-rnn uses 50
 hidden_size = 1000
-clip_gradients = False
+gradient_clip_value = 5
 
 # setup backend
-be = gen_backend(backend=args.backend,
-                 batch_size=batch_size,
-                 rng_seed=args.rng_seed,
-                 device_id=args.device_id,
-                 default_dtype=args.datatype)
+be = gen_backend(**extract_valid_args(args, gen_backend))
 
 # download penn treebank
 train_path = load_text('ptb-train', path=args.data_dir)
 valid_path = load_text('ptb-valid', path=args.data_dir)
 
-# load data and parse on character-level
 train_set = Text(time_steps, train_path)
 valid_set = Text(time_steps, valid_path, vocab=train_set.vocab)
 
@@ -68,42 +59,30 @@ valid_set = Text(time_steps, valid_path, vocab=train_set.vocab)
 init = Uniform(low=-0.08, high=0.08)
 
 # model initialization
-if rlayer_type == 'lstm':
-    rlayer = LSTM(hidden_size, init, Logistic(), Tanh())
-elif rlayer_type == 'gru':
-    rlayer = GRU(hidden_size, init, activation=Tanh(), gate_activation=Logistic())
+if args.rlayer_type == 'lstm':
+    rlayer = LSTM(hidden_size, init, activation=Logistic(), gate_activation=Tanh())
 else:
-    raise NotImplementedError('%s layer not implemented' % rlayer_type)
+    rlayer = GRU(hidden_size, init, activation=Tanh(), gate_activation=Logistic())
 
-layers = [
-    rlayer,
-    Affine(len(train_set.vocab), init, bias=init, activation=Softmax())
-]
+layers = [rlayer,
+          Affine(len(train_set.vocab), init, bias=init, activation=Softmax())]
 
 cost = GeneralizedCost(costfunc=CrossEntropyMulti(usebits=True))
 
 model = Model(layers=layers)
 
-optimizer = RMSProp(clip_gradients=clip_gradients, stochastic_round=args.rounding)
+optimizer = RMSProp(gradient_clip_value=gradient_clip_value, stochastic_round=args.rounding)
 
 # configure callbacks
-callbacks = Callbacks(model, train_set, output_file=args.output_file,
-                      valid_set=valid_set, valid_freq=args.validation_freq,
-                      progress_bar=args.progress_bar)
+callbacks = Callbacks(model, train_set, eval_set=valid_set, **args.callback_args)
 
 # train model
-model.fit(train_set,
-          optimizer=optimizer,
-          num_epochs=num_epochs,
-          cost=cost,
-          callbacks=callbacks)
+model.fit(train_set, optimizer=optimizer, num_epochs=args.epochs, cost=cost, callbacks=callbacks)
 
 # get predictions
 ypred = model.get_outputs(valid_set)
 prediction = ypred.argmax(2).reshape((valid_set.nbatches,
-                                      batch_size,
+                                      args.batch_size,
                                       time_steps)).transpose(1, 0, 2)
 fraction_correct = (prediction == valid_set.y).mean()
 print 'Misclassification error = %.1f%%' % ((1-fraction_correct)*100)
-
-

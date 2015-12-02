@@ -17,10 +17,9 @@
 MNIST example demonstrating the use of merge layers.
 """
 
-from neon.backends import gen_backend
 from neon.data import DataIterator, load_mnist
 from neon.initializers import Gaussian
-from neon.layers import GeneralizedCost, Affine, MergeSum
+from neon.layers import GeneralizedCost, Affine, Sequential, MergeMultistream
 from neon.models import Model
 from neon.optimizers import GradientDescentMomentum
 from neon.transforms import Rectlin, Logistic, CrossEntropyBinary
@@ -32,34 +31,24 @@ parser = NeonArgparser(__doc__)
 args = parser.parse_args()
 
 # hyperparameters
-batch_size = 128
 num_epochs = args.epochs
 
-# setup backend
-be = gen_backend(backend=args.backend,
-                 batch_size=batch_size,
-                 rng_seed=args.rng_seed,
-                 device_id=args.device_id,
-                 default_dtype=args.datatype)
-
 (X_train, y_train), (X_test, y_test), nclass = load_mnist(path=args.data_dir)
-train_set = DataIterator([X_train, X_train], y_train, nclass=nclass)
-valid_set = DataIterator([X_test, X_test], y_test, nclass=nclass)
+train_set = DataIterator([X_train, X_train], y_train, nclass=nclass, lshape=(1, 28, 28))
+valid_set = DataIterator([X_test, X_test], y_test, nclass=nclass, lshape=(1, 28, 28))
 
 # weight initialization
 init_norm = Gaussian(loc=0.0, scale=0.01)
 
 # initialize model
-path1 = Model(layers=[Affine(nout=100, init=init_norm, activation=Rectlin()),
-                      Affine(nout=100, init=init_norm, activation=Rectlin())])
+path1 = Sequential(layers=[Affine(nout=100, init=init_norm, activation=Rectlin()),
+                           Affine(nout=100, init=init_norm, activation=Rectlin())])
 
-path2 = Model(layers=[Affine(nout=100, init=init_norm, activation=Rectlin()),
-                      Affine(nout=100, init=init_norm, activation=Rectlin())])
+path2 = Sequential(layers=[Affine(nout=100, init=init_norm, activation=Rectlin()),
+                           Affine(nout=100, init=init_norm, activation=Rectlin())])
 
-layers = [
-    MergeSum([path1.layers, path2.layers]),
-    Affine(nout=10, init=init_norm, activation=Logistic(shortcut=True))
-]
+layers = [MergeMultistream(layers=[path1, path2], merge="stack"),
+          Affine(nout=10, init=init_norm, activation=Logistic(shortcut=True))]
 
 model = Model(layers=layers)
 cost = GeneralizedCost(costfunc=CrossEntropyBinary())
@@ -68,8 +57,6 @@ cost = GeneralizedCost(costfunc=CrossEntropyBinary())
 optimizer = GradientDescentMomentum(learning_rate=0.1, momentum_coef=0.9)
 
 # configure callbacks
-callbacks = Callbacks(model, train_set, output_file=args.output_file,
-                      valid_set=valid_set, valid_freq=args.validation_freq,
-                      progress_bar=args.progress_bar)
+callbacks = Callbacks(model, train_set, eval_set=valid_set, **args.callback_args)
 
 model.fit(train_set, cost=cost, optimizer=optimizer, num_epochs=num_epochs, callbacks=callbacks)

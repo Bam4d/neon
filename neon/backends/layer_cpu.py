@@ -36,7 +36,7 @@ def output_dim(X, S, padding, strides):
         padding (int): padding on each side
         strides (int): striding
     """
-    return ceil_div(X - S + 1 + 2 * padding, strides)
+    return (X - S + 2 * padding)/strides + 1
 
 
 class ConvLayer(object):
@@ -98,16 +98,26 @@ class ConvLayer(object):
         self.sizeO = reduce(mul, self.dimO, 1)
         self.nOut = reduce(mul, self.MPQ, 1) * K
 
+        self.mSlice = [self.fprop_slice(m, T, D, pad_d, str_d) for m in range(M)]
+        self.pSlice = [self.fprop_slice(p, R, H, pad_h, str_h) for p in range(P)]
+        self.qSlice = [self.fprop_slice(q, S, W, pad_w, str_w) for q in range(Q)]
+        self.dSlice = [self.bprop_slice(d, T, M, pad_d, str_d) for d in range(D)]
+        self.hSlice = [self.bprop_slice(h, R, P, pad_h, str_h) for h in range(H)]
+        self.wSlice = [self.bprop_slice(w, S, Q, pad_w, str_w) for w in range(W)]
+
     def fprop_slice(self, q, S, X, padding, strides):
+        firstF = 0
+        lastF = S - 1
         qs = q * strides - padding
-        sliceF = []
-        sliceI = []
-        for s in range(S):
-            x = qs + s
-            if x >= 0 and x < X:
-                sliceF.append(s)
-                sliceI.append(x)
-        return sliceF, sliceI
+        x2 = qs + lastF
+        if qs < 0:
+            firstF = -qs
+            qs = 0
+        if x2 >= X:
+            dif = x2 - X + 1
+            lastF -= dif
+            x2 -= dif
+        return (slice(firstF, lastF+1), slice(qs, x2+1), lastF-firstF+1)
 
     def bprop_slice(self, x, S, Q, padding, strides):
         qs = x - (S - padding - 1)
@@ -194,6 +204,13 @@ class DeconvLayer(ConvLayer):
         # nOut has to change because P and Q are now the inputs
         self.nOut = reduce(mul, self.DHW, 1) * C
 
+        self.dSlice = [self.bprop_slice(d, T, M, pad_d, str_d) for d in range(D)]
+        self.hSlice = [self.bprop_slice(h, R, P, pad_h, str_h) for h in range(H)]
+        self.wSlice = [self.bprop_slice(w, S, Q, pad_w, str_w) for w in range(W)]
+        self.mSlice = [self.fprop_slice(m, T, D, pad_d, str_d) for m in range(M)]
+        self.pSlice = [self.fprop_slice(p, R, H, pad_h, str_h) for p in range(P)]
+        self.qSlice = [self.fprop_slice(q, S, W, pad_w, str_w) for q in range(Q)]
+
 
 class PoolLayer(object):
 
@@ -274,11 +291,18 @@ class PoolLayer(object):
         self.sizeO = reduce(mul, self.dimO, 1)
         self.nOut = reduce(mul, self.MPQ, 1) * K
 
-    def pool_slice(self, q, S, X, pad, stride):
-        qs = q * stride - pad
-        sliceI = []
+        self.kSlice = [self.pool_slice(k, J, C, pad_c, str_c) for k in range(K)]
+        self.mSlice = [self.pool_slice(m, T, D, pad_d, str_d) for m in range(M)]
+        self.pSlice = [self.pool_slice(p, R, H, pad_h, str_h) for p in range(P)]
+        self.qSlice = [self.pool_slice(q, S, W, pad_w, str_w) for q in range(Q)]
+
+    def pool_slice(self, q, S, X, padding, strides):
+        qs = q * strides - padding
+        firstI = None
         for s in range(S):
             x = qs + s
             if x >= 0 and x < X:
-                sliceI.append(x)
-        return sliceI
+                if firstI is None:
+                    firstI = x
+                lastI = x
+        return (slice(firstI, lastI+1), lastI-firstI+1)

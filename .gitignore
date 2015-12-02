@@ -2,13 +2,13 @@
 *.sublime-workspace
 *.pyc
 *.pkl
+*.prm
 *.so
 *.swp
 .DS_Store
 neon/version.py
 *@eaDir
 .pkgs
-*.png
 *.egg-info
 .venv
 .coverage
@@ -21,6 +21,7 @@ generated
 *.h5
 *.html
 *.txt
+*.log
 neon_help_output.txt
 neon/backends/util/cuda_capability
 neon/backends/kernels/cu

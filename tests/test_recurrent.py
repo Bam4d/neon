@@ -102,7 +102,7 @@ def check_rnn(seq_len, input_size, hidden_size,
 
     # ======== create models ========
     # neon RNN
-    rnn = Recurrent(hidden_size, init_func, Tanh())
+    rnn = Recurrent(hidden_size, init_func, activation=Tanh())
 
     # reference numpy RNN
     rnn_ref = RefRecurrent(input_size, hidden_size)
@@ -128,7 +128,9 @@ def check_rnn(seq_len, input_size, hidden_size,
     # ========= running models ==========
     # run neon fprop
     rnn.configure((input_size, seq_len))
+    rnn.prev_layer = True
     rnn.allocate()
+    rnn.set_deltas([rnn.be.iobuf(rnn.in_shape)])
     rnn.fprop(inpa)
 
     # weights are only initialized after doing fprop, so now
@@ -149,7 +151,7 @@ def check_rnn(seq_len, input_size, hidden_size,
 
     # comparing outputs
     print '====Verifying hidden states===='
-    print allclose_with_out(rnn.h_buffer.get(),
+    print allclose_with_out(rnn.outputs.get(),
                             h_ref_list,
                             rtol=0.0,
                             atol=1.0e-5)
@@ -186,7 +188,7 @@ def reset_rnn(rnn):
     # cleared
     rnn.x = None
     rnn.xs = None  # just in case
-    rnn.h_buffer = None
+    rnn.outputs = None
     return
 
 
@@ -254,12 +256,14 @@ def gradient_calc(seq_len, input_size, hidden_size, batch_size,
         inp_bl = np.random.randn(*input_shape)
 
     # neon rnn instance
-    rnn = Recurrent(hidden_size, Gaussian(), Tanh())
+    rnn = Recurrent(hidden_size, Gaussian(), activation=Tanh())
     inpa = rnn.be.array(np.copy(inp_bl))
 
     # run fprop on the baseline input
     rnn.configure((input_size, seq_len))
+    rnn.prev_layer = True
     rnn.allocate()
+    rnn.set_deltas([rnn.be.iobuf(rnn.in_shape)])
     out_bl = rnn.fprop(inpa).get()
 
     # random scaling/hash to generate fake loss
