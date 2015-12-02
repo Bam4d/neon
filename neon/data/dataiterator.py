@@ -134,6 +134,135 @@ class DataIterator(NervanaObject):
             targets = self.ybuf if self.ybuf else inputs
             yield (inputs, targets)
 
+class MaskedDataIterator(NervanaObject):
+
+    """
+    This generic class defines an interface to iterate over minibatches of
+    data that has been preloaded into memory. This may be used when the
+    entire dataset is small enough to fit within memory.
+
+    This also includes a masking array which can be used to stop errors propagating from non-differentiable outputs
+    """
+
+    def __init__(self, X, Y, mask, nclass=None, lshape=None, make_onehot=True):
+        """
+        Implements loading of given data into backend tensor objects. If the
+        backend is specific to an accelarator device, the data is copied over
+        to that device.
+
+        Args:
+            X (ndarray, shape: [# examples, feature size]): Input features within the
+                dataset.
+            y (ndarray, shape:[# examples, output size], optional): Labels corresponding to the
+                input features.
+                If absent, the input features themselves will be returned as
+                target values (AutoEncoder)
+            mask (ndarray, shape: [# examples, (1 or output size)]): Input feature mask for the
+                dataset.
+            nclass (int, optional): The number of possible types of labels.
+                (not necessary if not providing labels)
+            lshape (tuple, optional): Local shape for the input features
+                (e.g. height, width, channel for images)
+            make_onehot (bool, optional): True if y is a label that has to be converted to one hot
+                            False if y doesn't need to be converted to one hot
+                            (e.g. in a CAE)
+
+        """
+        # Treat singletons like list so that iteration follows same syntax
+        X = X if isinstance(X, list) else [X]
+        self.ndata = len(X[0])
+        self.nclasses = nclass
+        self.nbatches = self.ndata / (self.be.bsz)
+        #self.shape = time_steps
+        self.start = 0
+
+        # on device tensor with full dataset
+        self.Xdev = [self.be.array(x) for x in X]
+        # mini-batch sized buffer
+        self.Xbuf = [self.be.iobuf(x.shape[1]) for x in X]
+
+        if lshape is not None:
+            self.shape = [lshape for x in X]
+        else:
+            self.shape = [x.shape[1] for x in X]
+
+        if len(self.shape) == 1:
+            self.shape = self.shape[0]
+
+        assert self.ndata >= self.be.bsz
+
+        self.ybuf = None
+        self.make_onehot = make_onehot
+        if Y is not None:
+            if make_onehot:
+                assert self.nclasses is not None
+                self.ydev = self.be.array(Y)
+                self.ylab = self.be.iobuf(Y.shape[1], dtype=np.int32)
+                self.ybuf = self.be.iobuf((self.nclasses, Y.shape[1]))
+            else:
+                self.ydev = [self.be.array(y) for y in Y]
+                self.ybuf = [self.be.iobuf(Y.shape[1]) for y in Y]
+
+        self.ylab_flat = self.ylab.reshape((1,-1))
+        self.mlab = self.be.iobuf(mask.shape[1])
+        self.mlab_flat = self.mlab.reshape((1,-1))
+
+        self.mdev = self.be.array(mask)
+        self.mbuf = self.be.iobuf((1, mask.shape[1]))
+
+
+    def reset(self):
+        """
+        For resetting the starting index of this dataset back to zero.
+        Relevant for when one wants to call repeated evaluations on the dataset
+        but don't want to wrap around for the last uneven minibatch
+        Not necessary when ndata is divisible by batch size
+        """
+        self.start = 0
+
+    def __iter__(self):
+        """
+        Defines a generator that can be used to iterate over this dataset.
+
+        Yields:
+            tuple: The next minibatch. A minibatch includes both features and
+            labels.
+        """
+        for i1 in range(self.start, self.ndata, self.be.bsz):
+            i2 = min(i1 + self.be.bsz, self.ndata)
+            bsz = i2 - i1
+            if i2 == self.ndata:
+                self.start = self.be.bsz - bsz
+
+            for xbuf, xdev in zip(self.Xbuf, self.Xdev):
+                xbuf[:, :bsz] = xdev[i1:i2].T
+                if self.be.bsz > bsz:
+                    xbuf[:, bsz:] = xdev[:(self.be.bsz - bsz)].T
+
+            if self.ybuf is not None:
+                if self.make_onehot:
+                    if self.be.bsz > bsz:
+                        self.ylab[:, bsz:] = self.ydev[:(self.be.bsz - bsz)].T
+                    else:
+                        self.ylab[:] = self.ydev[i1:i2].T
+                    self.ybuf[:] = self.be.onehot(self.ylab_flat, axis=0)
+
+                else:
+                    self.ybuf[:, :bsz] = self.ydev[i1:i2].T
+                    if self.be.bsz > bsz:
+                        self.ybuf[:, bsz:] = self.ydev[:(self.be.bsz - bsz)].T
+
+            if self.be.bsz > bsz:
+                self.mlab[:, bsz:] = self.mdev[:(self.be.bsz - bsz)].T
+            else:
+                self.mlab[:] = self.mdev[i1:i2].T
+
+            self.mbuf[:] = self.mlab_flat
+
+            inputs = self.Xbuf[0] if len(self.Xbuf) == 1 else self.Xbuf
+            targets_mask = (self.ybuf if self.ybuf else inputs, self.mbuf)
+            yield (inputs, targets_mask)
+
 
 if __name__ == '__main__':
     from neon.data import load_mnist
