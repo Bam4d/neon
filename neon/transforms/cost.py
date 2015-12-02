@@ -204,6 +204,7 @@ class MeanSquared(Cost):
         self.funcgrad = lambda y, t: (y - t)/y.shape[0]
 
 
+
 class TopKMisclassification(Metric):
 
     """
@@ -301,3 +302,50 @@ class Accuracy(Metric):
         self.outputs[:] = self.be.equal(self.preds, self.hyps)
 
         return self.outputs.get()[:, calcrange].mean()
+
+class PrecisionRecallMetric(Metric):
+
+    '''
+    Compute precision and recall metrics
+    '''
+
+    def __init__(self, labels, length):
+        self.outputs = self.be.zeros((2, len(labels)+1))
+        self.token_stats = self.be.zeros((4, len(labels)+1))
+        self.metric_names = ['Precision','Recall']
+        self.yclass = self.be.iobuf(length, dtype=np.int32).reshape((1, -1))
+        self.length = length
+
+    def __call__(self, y, t):
+
+        """
+        Compute the precision and recall of a multi-class classification model
+
+        Args:
+            y (Tensor or OpTree): Output of previous layer or model
+            t (Tensor or OpTree): True targets corresponding to y
+
+        Returns:
+            float: Returns the precision and recall values
+        """
+
+        self.yclass[:] = self.be.argmax(y, axis=0)
+        y[:] = self.be.onehot(self.yclass, axis=0)
+
+        # True positives
+        self.token_stats[0, :] = self.be.sum(y*t[0], axis=1).T
+
+        # Prediction
+        self.token_stats[1, :] = self.be.sum(y, axis=1).T
+
+        # Targets
+        self.token_stats[2, :] = self.be.sum(t[0], axis=1).T
+
+        # Precision
+        self.outputs[0, :] = self.token_stats[0, :] / (self.token_stats[1, :]+0.0000001)
+
+        # Recall
+        self.outputs[1, :] = self.token_stats[0, :] / (self.token_stats[2, :]+0.0000001)
+
+        # reshape here so there is no summing across the label predictions
+        return self.outputs
