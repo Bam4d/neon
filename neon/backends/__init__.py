@@ -21,6 +21,7 @@ import logging
 import os
 import sys
 import numpy as np
+from math import ceil
 
 from neon import NervanaObject
 from neon.backends.autodiff import Autodiff
@@ -29,7 +30,7 @@ from neon.backends.util.check_gpu import get_device_count
 
 def gen_backend(backend='cpu', rng_seed=None, datatype=np.float32,
                 batch_size=0, stochastic_round=False, device_id=0,
-                max_devices=get_device_count()):
+                max_devices=get_device_count(), compat_mode=None):
     """
     Construct and return a backend instance of the appropriate type based on
     the arguments given. With no parameters, a single CPU core, float32
@@ -55,6 +56,9 @@ def gen_backend(backend='cpu', rng_seed=None, datatype=np.float32,
         max_devices (int, optional): For use with multi-GPU backend only.
                                       Controls the maximum number of GPUs to run
                                       on.
+        compat_mode (str, optional): if this is set to 'caffe' then the conv and pooling
+                                     layer output sizes will match that of caffe as will
+                                     the dropout layer implementation
 
     Returns:
         Backend: newly constructed backend instance of the specifed type.
@@ -75,7 +79,7 @@ def gen_backend(backend='cpu', rng_seed=None, datatype=np.float32,
 
     if backend == 'cpu' or backend is None:
         from neon.backends.nervanacpu import NervanaCPU
-        be = NervanaCPU(rng_seed=rng_seed, default_dtype=datatype)
+        be = NervanaCPU(rng_seed=rng_seed, default_dtype=datatype, compat_mode=compat_mode)
     elif backend == 'gpu' or backend == 'mgpu':
         gpuflag = False
         # check nvcc
@@ -88,7 +92,9 @@ def gen_backend(backend='cpu', rng_seed=None, datatype=np.float32,
             from neon.backends.nervanagpu import NervanaGPU
             # init gpu
             be = NervanaGPU(rng_seed=rng_seed, default_dtype=datatype,
-                            stochastic_round=stochastic_round, device_id=device_id)
+                            stochastic_round=stochastic_round,
+                            device_id=device_id,
+                            compat_mode=compat_mode)
         else:
             try:
                 from mgpu.nervanamgpu import NervanaMGPU
