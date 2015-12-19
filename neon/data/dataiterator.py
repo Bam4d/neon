@@ -134,6 +134,7 @@ class DataIterator(NervanaObject):
             targets = self.ybuf if self.ybuf else inputs
             yield (inputs, targets)
 
+
 class MaskedDataIterator(NervanaObject):
 
     """
