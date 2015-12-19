@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ----------------------------------------------------------------------------
-from neon.data.dataiterator import DataIterator
+from neon.data.dataiterator import DataIterator, MaskedDataIterator
 from neon.data.text import Text
 from neon.data.imageloader import ImageLoader
 from neon.data.questionanswer import BABI, QA
