@@ -18,8 +18,9 @@ import numpy as np
 import os
 
 from neon import NervanaObject
-from neon.data import DataIterator, load_mnist
+from neon.data import DataIterator, MaskedDataIterator, load_mnist
 from neon.data.text import Text
+from neon.transforms import SumSquared
 
 logging.basicConfig(level=20)
 logger = logging.getLogger()
@@ -89,3 +90,45 @@ def test_text(backend_default):
     os.remove(data_path)
     os.remove(train_path)
     os.remove(valid_path)
+
+
+"""
+    MaskedDataIterator
+"""
+
+
+def test_masked_data_iterator(backend_default):
+
+    # Mock train set
+    x = np.zeros([10, 10])
+
+    # Mock targets/mask
+    targets = np.ones([10,10])
+
+    # Alternate the masks
+    mask = np.ones([10,10])
+    mask[:, ::2] = 0
+
+    be = NervanaObject.be
+    NervanaObject.be.bsz = 1
+    train_set = MaskedDataIterator(x, targets, mask, nclass=2)
+
+    # Mock outputs
+    batch_output = be.iobuf((2, 10), dtype=np.int32)
+    batch_output[:] = be.onehot(be.zeros((be.bsz*10), dtype=np.int32), axis=0)
+
+    # Use cost with mask
+    cost = be.zeros(1)
+    sse = SumSquared()
+
+    for i in range(2):
+        for X_batch, y_batch in train_set:
+            assert len(y_batch) == 2
+
+            targets_batch, mask_batch = y_batch
+            masked_input = batch_output * mask_batch
+            cost[:] = be.mean(sse(masked_input, targets_batch), axis=1)
+            assert cost[0][0] == 0.75
+
+
+
