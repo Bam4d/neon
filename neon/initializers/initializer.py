@@ -128,3 +128,20 @@ class Orthonormal(Initializer):
         # pick the one with the correct shape
         q = u if u.shape == param.shape else v
         param[:] = self.scale * q
+
+
+class PreTrained(Initializer):
+    """
+    A class for initializing parameter tensors with a matrix of pre-trained values.
+
+    for example initializing a LookupTable with values from word2vec
+
+    Args:
+        val (np.array, optional): The array to assign the tensors
+    """
+    def __init__(self, array, name="pre-trained"):
+        super(PreTrained, self).__init__(name=name)
+        self.array = array
+
+    def fill(self, param):
+        param.fill(self.be.array(self.array).T)

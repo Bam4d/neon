@@ -47,3 +47,8 @@ Orthonormal
 -------------
 .. autosummary::
    neon.initializers.initializer.Orthonormal
+
+PreTrained
+-------------
+.. autosummary::
+   neon.initializers.initializer.PreTrained
