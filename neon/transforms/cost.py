@@ -204,6 +204,29 @@ class MeanSquared(Cost):
         self.funcgrad = lambda y, t: (y - t)/y.shape[0]
 
 
+class LogLoss(Metric):
+    """
+    Compute logloss
+    """
+    def __init__(self):
+        self.correctProbs = self.be.iobuf(1)
+        self.metric_names = ['LogLoss']
+
+    def __call__(self, y, t, calcrange=slice(0, None)):
+        """
+        Args:
+            y (Tensor or OpTree): Output of previous layer or model
+            t (Tensor or OpTree): True targets corresponding to y
+
+        Returns:
+            numpy array : Returns the log loss  metric in numpy array,
+                         [LogLoss]
+        """
+        self.correctProbs[:] = self.be.sum(y * t, axis=0)
+        self.correctProbs[:] = -self.be.safelog(self.correctProbs)
+        return np.array(self.correctProbs.get()[:, calcrange].mean())
+
+
 class TopKMisclassification(Metric):
 
     """
@@ -227,7 +250,8 @@ class TopKMisclassification(Metric):
             t (Tensor or OpTree): True targets corresponding to y
 
         Returns:
-            float: Returns the metric
+            numpy ary : Returns the metrics in numpy array,
+                        [LogLoss, Top 1 misclass, Top k misclass]
         """
         be = self.be
         self.correctProbs[:] = be.sum(y * t, axis=0)
@@ -301,3 +325,52 @@ class Accuracy(Metric):
         self.outputs[:] = self.be.equal(self.preds, self.hyps)
 
         return self.outputs.get()[:, calcrange].mean()
+
+
+class PrecisionRecall(Metric):
+    """
+    Compute precision and recall metrics
+
+    Arguments:
+        num_classes (int): Number of different output classes.
+        epsilon (float, optional): Smoothing to apply to avoid divsion by zero.
+                                   Defaults to 1e-6.
+    """
+    def __init__(self, num_classes, epsilon=1e-6):
+        self.outputs = self.be.empty((num_classes, 2))
+        self.token_stats = self.be.empty((num_classes, 3))
+        self.metric_names = ['Precision', 'Recall']
+        self.eps = epsilon
+
+    def __call__(self, y, t):
+        """
+        Compute the precision and recall of a multi-class classification model
+
+        Args:
+            y (Tensor or OpTree): Output of previous layer or model (we assume
+                                  already binarized)
+            t (Tensor or OpTree): True targets corresponding to y (we assume
+                                  already binarized)
+
+        Returns:
+            ndarray: Returns the class averaged precision (item 0) and recall (item
+                     1) values.  Per-class statistics remain in self.outputs.
+        """
+        # True positives
+        self.token_stats[:, 0] = self.be.sum(y * t, axis=1)
+
+        # Prediction
+        self.token_stats[:, 1] = self.be.sum(y, axis=1)
+
+        # Targets
+        self.token_stats[:, 2] = self.be.sum(t, axis=1)
+
+        # Precision
+        self.outputs[:, 0] = self.token_stats[:, 0] / (self.token_stats[:, 1] +
+                                                       self.eps)
+
+        # Recall
+        self.outputs[:, 1] = self.token_stats[:, 0] / (self.token_stats[:, 2] +
+                                                       self.eps)
+
+        return self.outputs.get().mean(axis=0)

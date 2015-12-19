@@ -391,7 +391,10 @@ class ParameterLayer(Layer):
         parallel, distributed = self.get_param_attrs()
         self.W = self.be.empty(shape, parallel=parallel, distributed=distributed)
         self.dW = self.be.empty_like(self.W)
-        self.init.fill(self.W)
+        if isinstance(self.init, Tensor) or isinstance(self.init, np.ndarray):
+            self.W[:] = self.init
+        else:
+            self.init.fill(self.W)
 
     def get_param_attrs(self):
         if self.parallelism == "Data":
@@ -900,12 +903,16 @@ class Dropout(Layer):
         super(Dropout, self).__init__(name)
         self.keep = keep
         self.keep_mask = None
-        self._train_scaling = 1.0/keep  # scaling factor during training
+        self.caffe_mode = self.be.check_caffe_compat()
+        if self.caffe_mode:
+            self._train_scaling = 1.0/keep  # scaling factor during training
+        else:
+            self._train_scaling = 1.0  # override scaling factor to retain binary mask
         self.owns_output = False
 
     def __str__(self):
-        return "Dropout Layer '%s': %d inputs and outputs, keep %d%%" % (
-               self.name, self.nout, 100*self.keep)
+        return "Dropout Layer '%s': %d inputs and outputs, keep %d%% (caffe_compat %s)" % (
+               self.name, self.nout, 100*self.keep, self.caffe_mode)
 
     def configure(self, in_obj):
         super(Dropout, self).configure(in_obj)
@@ -928,28 +935,33 @@ class Dropout(Layer):
         return self.outputs
 
     def _fprop_inference(self, inputs):
+        if not self.caffe_mode:
+            self.outputs[:] = inputs * self.keep
         return self.outputs
 
     def bprop(self, error, alpha=1.0, beta=0.0):
         if not self.deltas:
             self.deltas = error
-
         self.deltas[:] = self.keep_mask * error * alpha * self._train_scaling + beta * error
         return self.deltas
 
 
 class DropoutBinary(Dropout):
-
     """
     A dropout layer that does no scaling by keep ratio during training
 
     Arguments:
        keep (float): fraction of the inputs that should be stochastically kept.
+
+    NOTE: this class will be deprecated, the Dropout class executes this behavior
+    by default now
     """
 
     def __init__(self, keep=0.5, name="dropbinarylayer"):
         super(DropoutBinary, self).__init__(keep, name)
         self._train_scaling = 1.0  # override scaling factor to retain binary mask
+        logger.warning('DropoutBinary class will be deprecated, please use '
+                       'Dropout layer instead')
 
     def __str__(self):
         return "Dropout Binary Layer '%s': %d inputs and outputs, keep %d%%" % (
@@ -984,10 +996,13 @@ class LookupTable(ParameterLayer):
         name (str, optional): Layer name. Defaults to "LookupTableLayer"
     """
 
-    def __init__(self, vocab_size, embedding_dim, init, name="LookupTableLayer"):
+    def __init__(self, vocab_size, embedding_dim, init, update=True,
+                 pad_idx=None, name="LookupTableLayer"):
         super(LookupTable, self).__init__(init, name)
         self.embedding_dim = embedding_dim
         self.vocab_size = vocab_size
+        self.update = update
+        self.pad_idx = pad_idx
 
     def __str__(self):
         return "LookupTable Layer : %d inputs, (%d, %d) outputs size" % (
@@ -1006,6 +1021,9 @@ class LookupTable(ParameterLayer):
         if self.inputs is None:
             self.inputs = self.be.zeros(
                 (1, self.nin * self.be.bsz), dtype=np.int32)  # inputs is np.float32
+        self.dW[:] = 0
+        if self.pad_idx is not None:
+            self.W[:, self.pad_idx] = 0
 
     def fprop(self, inputs, inference=False):
         self.inputs[:] = inputs.reshape(self.inputs.shape)
@@ -1013,12 +1031,14 @@ class LookupTable(ParameterLayer):
         return self.outputs
 
     def bprop(self, error, alpha=1.0, beta=0):
-        self.dW[:] = 0
-        wrd_ids = self.inputs.get()[0]
-        unqidx, inv = np.unique(wrd_ids, return_inverse=True)
-        groups = [np.where(inv == i) for i in range(len(unqidx))]
-        for (wrd_id, group) in zip(unqidx, groups):
-            self.dW[:, wrd_id] = self.be.sum(error.take(group[0], axis=1), axis=1)
+        if self.update:
+            self.dW[:] = 0
+            wrd_ids = self.inputs.get()[0]
+            unqidx, inv = np.unique(wrd_ids, return_inverse=True)
+            groups = [np.where(inv == i) for i in range(len(unqidx))]
+            for (wrd_id, group) in zip(unqidx, groups):
+                if self.pad_idx != wrd_id:
+                    self.dW[:, wrd_id] = self.be.sum(error.take(group[0], axis=1), axis=1)
         """
         alternative bprop
         for (j, wrd_id) in enumerate(wrd_ids):

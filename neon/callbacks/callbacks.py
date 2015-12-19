@@ -21,8 +21,8 @@ from neon import NervanaObject
 from neon.util.persist import save_obj
 from timeit import default_timer
 from neon.layers import Convolution
-import numpy as np
 import time
+import numpy as np
 logger = logging.getLogger(__name__)
 
 
@@ -93,13 +93,12 @@ class Callbacks(NervanaObject):
                 err_msg = 'Evaluation frequency specified but no eval set provided`!'
                 logger.exception(err_msg)
                 raise ValueError(err_msg)
-            epos = None
+
+            ecb = LossCallback(self.callback_data, model, eval_set, eval_freq)
+            self.add_callback(ecb, insert_pos=0)
             if metric:
-                ecb = MetricCallback(model, eval_set, metric, eval_freq)
-            else:
-                ecb = LossCallback(self.callback_data, model, eval_set, eval_freq)
-                epos = 0
-            self.add_callback(ecb, insert_pos=epos)
+                ecb = MetricCallback(self.callback_data, model, eval_set, metric, eval_freq)
+                self.add_callback(ecb, insert_pos=None)
 
         if save_path:
             serialize_interval = serialize if serialize > 1 else 1
@@ -113,6 +112,7 @@ class Callbacks(NervanaObject):
             self.add_callback(scb)
 
         self.add_callback(TrainLoggerCallback(self.callback_data, model))
+        self.add_callback(RunTimerCallback(self.callback_data, model))
 
     def add_deconv_callback(self, train_set, valid_set, max_fm=16, dataset_pct=25):
         """
@@ -409,6 +409,31 @@ class SerializeModelCallback(Callback):
         save_obj(self.model.serialize(keep_states=True), save_path)
 
 
+class RunTimerCallback(Callback):
+    """
+    Callback which tracks the total training time
+
+    Arguments:
+        callback_data (HDF5 dataset): shared data between callbacks
+        model (Model): model object
+
+    """
+    def __init__(self, callback_data, model):
+        super(RunTimerCallback, self).__init__()
+        self.callback_data = callback_data
+
+    def on_train_begin(self, epochs):
+        timing = self.callback_data.create_group("time/train")
+        timing.create_dataset("start_time", (1,), dtype='float64')
+        timing.create_dataset("end_time", (1,), dtype='float64')
+        timing['start_time'][0] = time.time()
+        timing['start_time'].attrs['units'] = 'seconds'
+
+    def on_train_end(self):
+        self.callback_data['time/train/end_time'][0] = time.time()
+        self.callback_data['time/train/end_time'].attrs['units'] = 'seconds'
+
+
 class TrainCostCallback(Callback):
     """
     Callback for computing average training cost periodically during training.
@@ -460,7 +485,7 @@ class LossCallback(Callback):
         super(LossCallback, self).__init__(epoch_freq=epoch_freq)
         self.model = model
         self.eval_set = eval_set
-        self.loss = self.be.zeros((1, 1))
+        self.loss = self.be.zeros((1, 1), dtype=np.float32)
         self.callback_data = callback_data
 
     def on_train_begin(self, epochs):
@@ -488,18 +513,86 @@ class LossCallback(Callback):
 
 
 class MetricCallback(Callback):
-    def __init__(self, model, eval_set, metric, epoch_freq=1):
+    def __init__(self, callback_data, model, eval_set, metric, epoch_freq=1):
         super(MetricCallback, self).__init__(epoch_freq=epoch_freq)
+        self.callback_data = callback_data
         self.model = model
         self.eval_set = eval_set
         self.metric = metric
+        self.metric_cnt = len(self.metric.metric_names)
         self.metric_desc = ", ".join(self.metric.metric_names)
+
+    def on_train_begin(self, epochs):
+        self.callback_data.create_group("metrics")
+        for met in self.metric.metric_names:
+            group_name = "metrics/%s" % met
+            self.callback_data.create_dataset(group_name, (epochs/self.epoch_freq,))
+            self.callback_data[group_name].attrs['time_markers'] = 'epoch_freq'
+            self.callback_data[group_name].attrs['epoch_freq'] = self.epoch_freq
 
     def on_epoch_end(self, epoch):
         if (epoch + 1) % self.epoch_freq == 0:
             self.eval_set.reset()
             stats = self.model.eval(self.eval_set, metric=self.metric)
             logger.info('%s: %s', self.metric_desc, ", ".join(map(str, stats.flatten())))
+
+            for ind, met in enumerate(self.metric.metric_names):
+                self.callback_data["metrics/%s" % met][epoch/self.epoch_freq] = stats[ind]
+
+
+class MultiLabelStatsCallback(Callback):
+
+    """
+    Callback for calculating statistics on multi-label classification tasks.
+
+    Can be used with PrecisionRecall metric to calculate precision and recall
+    values of the classification task.
+
+    Arguments:
+        model (Model): model object
+        eval_set (DataIterator): dataset to evaluate
+        labels (list): the list of class names (order must be the same as
+                       the rows of the target)
+        metric (Metric): An instantiated performance metric like
+                         PrecisionRecall
+        epoch_freq (int, optional): how often (in epochs) to log info.
+                                    Defaults to every 1 epoch.
+    """
+
+    def __init__(self, model, eval_set, labels, metric, epoch_freq=1):
+        super(MultiLabelStatsCallback, self).__init__(epoch_freq=epoch_freq)
+        self.model = model
+        self.eval_set = eval_set
+        self.metric = metric
+        self.labels = labels
+        self.metric_desc = ", ".join(self.metric.metric_names)
+
+    def on_epoch_end(self, epoch):
+        if (epoch + 1) % self.epoch_freq == 0:
+            self.eval_set.reset()
+
+            running_stats = np.zeros_like(self.metric.outputs.get(), dtype=np.float32)
+
+            # Calculate the metric values
+            nbatch = 0
+            for x, t in self.eval_set:
+                x = self.model.fprop(x, inference=True)
+
+                self.metric(x, t)
+                running_stats += self.metric.outputs.get()
+                nbatch += 1
+
+            running_stats /= nbatch
+
+            # Print the statistics for all the labels
+            for i, label in enumerate(self.labels):
+                metric_text = "["
+                for k, metric in enumerate(self.metric.metric_names):
+                    metric_text += "%s: %d%% " % (metric, running_stats[k][i+1]*100.0)
+
+                metric_text += " ] -> %s\n" % label
+                sys.stdout.write(metric_text.encode('utf-8'))
+                sys.stdout.flush()
 
 
 class HistCallback(Callback):
@@ -859,14 +952,14 @@ class DeconvCallback(Callback):
         imgs_to_store = set()
 
         for l, lyr in enumerate(self.model.layers.layers, 0):
-            num_fm, H, W = lyr.out_shape
-            fm_argmax = self.be.zeros((num_fm, 1), dtype=np.int32)
-            maxact_idx = self.be.array(np.arange(num_fm) * H * W * self.be.bsz, dtype=np.int32)
-
             x = lyr.fprop(x, inference=True)
 
             if not isinstance(lyr, Convolution):
                 continue
+
+            num_fm, H, W = lyr.out_shape
+            fm_argmax = self.be.zeros((num_fm, 1), dtype=np.int32)
+            maxact_idx = self.be.array(np.arange(num_fm) * H * W * self.be.bsz, dtype=np.int32)
 
             act_data = self.callback_data["deconv/max_act/{0:04}".format(l)]
 

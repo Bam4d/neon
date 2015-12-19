@@ -26,19 +26,6 @@ def ceil_div(x, y):
     return -(-x // y)
 
 
-def output_dim(X, S, padding, strides):
-    """
-    compute along 1 dimension, with these sizes, what will be the output dimension
-
-    Arguments:
-        X (int): input data dimension
-        S (int): filter dimension
-        padding (int): padding on each side
-        strides (int): striding
-    """
-    return (X - S + 2 * padding)/strides + 1
-
-
 class ConvLayer(object):
 
     """
@@ -70,9 +57,9 @@ class ConvLayer(object):
                  bsum=False):
 
         # Compute the output spatial dimensions
-        M = output_dim(D, T, pad_d, str_d)
-        P = output_dim(H, R, pad_h, str_h)
-        Q = output_dim(W, S, pad_w, str_w)
+        M = lib.output_dim(D, T, pad_d, str_d)
+        P = lib.output_dim(H, R, pad_h, str_h)
+        Q = lib.output_dim(W, S, pad_w, str_w)
 
         self.C = C
         self.K = K
@@ -264,10 +251,10 @@ class PoolLayer(object):
             self.overlap = 0.0
 
         # Compute the output dimensions
-        K = output_dim(C, J, pad_c, str_c)
-        M = output_dim(D, T, pad_d, str_d)
-        P = output_dim(H, R, pad_h, str_h)
-        Q = output_dim(W, S, pad_w, str_w)
+        K = lib.output_dim(C, J, pad_c, str_c, pooling=True)
+        M = lib.output_dim(D, T, pad_d, str_d, pooling=True)
+        P = lib.output_dim(H, R, pad_h, str_h, pooling=True)
+        Q = lib.output_dim(W, S, pad_w, str_w, pooling=True)
 
         self.op = op
         self.C = C

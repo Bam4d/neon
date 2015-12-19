@@ -17,6 +17,7 @@ import ctypes as ct
 import logging
 import numpy as np
 import os
+import atexit
 
 from neon import NervanaObject
 from neon.util.persist import load_obj
@@ -31,12 +32,12 @@ class ImageLoader(NervanaObject):
     """
 
     def __init__(self, repo_dir, inner_size, do_transforms=True,
-                 rgb=True, multiview=False, set_name='train', subset_pct=100,
+                 rgb=True, shuffle=False, set_name='train', subset_pct=100,
                  nlabels=1, macro=True, dtype=np.float32):
         if not rgb:
             raise ValueError('Non-RGB images are currently not supported')
         self.configure(repo_dir, inner_size, do_transforms,
-                       rgb, multiview, set_name, subset_pct, macro)
+                       rgb, shuffle, set_name, subset_pct, macro)
         libpath = os.path.dirname(os.path.realpath(__file__))
         try:
             self.loaderlib = ct.cdll.LoadLibrary(
@@ -71,9 +72,10 @@ class ImageLoader(NervanaObject):
             # Just center uint8 values if missing global mean.
             self.mean = 127.
         self.start()
+        atexit.register(self.stop)
 
     def configure(self, repo_dir, inner_size, do_transforms,
-                  rgb, multiview, set_name, subset_pct, macro):
+                  rgb, shuffle, set_name, subset_pct, macro):
         """
         Set up all dataset config options.
         """
@@ -89,7 +91,7 @@ class ImageLoader(NervanaObject):
         self.center = not do_transforms
         self.flip = do_transforms
         self.rgb = rgb
-        self.multiview = multiview
+        self.shuffle = shuffle
         self.start_idx = 0
         self.macro = macro
 
@@ -158,7 +160,7 @@ class ImageLoader(NervanaObject):
         """
         For backward compatibility.
         """
-        self.stop()
+        pass
 
     def start(self):
         """
@@ -194,7 +196,7 @@ class ImageLoader(NervanaObject):
                                            ct.c_bool(self.center),
                                            ct.c_bool(self.flip),
                                            ct.c_bool(self.rgb),
-                                           ct.c_bool(self.multiview),
+                                           ct.c_bool(self.shuffle),
                                            ct.c_int(self.minibatch_size),
                                            ct.c_char_p(self.filename),
                                            ct.c_int(self.macro_start),
@@ -215,6 +217,7 @@ class ImageLoader(NervanaObject):
         Restart data from index 0
         """
         # Reset local state
+        self.idx = 0
         self.start_idx = 0
         self.loaderlib.reset(self.loader)
 
