@@ -23,7 +23,6 @@ from neon.layers import Dropout, Conv, Pooling, Sequential, MergeMultistream, Re
 from neon.models import Model
 from neon.optimizers import GradientDescentMomentum
 from neon.transforms import Rectlin, Logistic, CrossEntropyBinary
-from neon.util.persist import save_obj
 
 
 def test_model_get_outputs_rnn(backend_default, data):
@@ -114,11 +113,11 @@ def test_model_serialize(backend_default, data):
             break
 
     # Serialize model
-    save_obj(mlp.serialize(keep_states=True), tmp_save)
+    mlp.save_params(tmp_save, keep_states=True)
 
     # Load model
     mlp = Model(layers=layers)
-    mlp.load_weights(tmp_save)
+    mlp.load_params(tmp_save)
 
     outputs = []
     pdicts = [l.get_params_serialize() for l in mlp.layers_to_optimize]

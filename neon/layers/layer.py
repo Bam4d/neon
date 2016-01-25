@@ -475,12 +475,14 @@ class Convolution(ParameterLayer):
     """
 
     def __init__(self, fshape, strides={}, padding={}, init=None, bsum=False,
-                 name="ConvolutionLayer", parallelism="Data"):
+                 name="ConvolutionLayer", parallelism="Data",
+                 deterministic_update=False):
         super(Convolution, self).__init__(init, name, parallelism)
         self.nglayer = None
         self.convparams = {'str_h': 1, 'str_w': 1, 'str_d': 1,
                            'pad_h': 0, 'pad_w': 0, 'pad_d': 0,
-                           'T': 1, 'D': 1, 'bsum': bsum}  # 3D paramaters
+                           'T': 1, 'D': 1, 'bsum': bsum,
+                           'deterministic_update': deterministic_update}  # 3D paramaters
 
         # keep around args in __dict__ for get_description.
         self.fshape = fshape
@@ -861,10 +863,12 @@ class Conv(Affine):
 
     def __init__(self, fshape, init, strides={}, padding={}, bias=None, batch_norm=False,
                  activation=None, conv_name='ConvolutionLayer',
-                 bias_name='BiasLayer', act_name='ActivationLayer'):
+                 bias_name='BiasLayer', act_name='ActivationLayer',
+                 deterministic_update=False):
         list.__init__(self)
         self.append(Convolution(fshape=fshape, strides=strides, padding=padding,
-                                init=init, bsum=batch_norm, name=conv_name))
+                                init=init, bsum=batch_norm, name=conv_name,
+                                deterministic_update=deterministic_update))
         self.add_postfilter_layers(bias, batch_norm, activation, bias_name, act_name)
 
 
@@ -881,6 +885,49 @@ class Deconv(Affine):
         self.append(Deconvolution(fshape=fshape, strides=strides, padding=padding,
                                   init=init, bsum=batch_norm))
         self.add_postfilter_layers(bias, batch_norm, activation, bias_name, act_name)
+
+
+class LRN(Layer):
+    def __init__(self, depth, alpha=1., beta=0., ascale=1., bpower=1.):
+        super(LRN, self).__init__(name="LRNLayer")
+        self.J = depth
+        self.alpha = alpha
+        self.beta = beta
+        self.ascale = ascale
+        self.bpower = bpower
+        self.owns_delta = True
+        self.lrnparams = {'J': self.J}
+        self.nglayer = None
+
+    def configure(self, in_obj):
+        super(LRN, self).configure(in_obj)
+        if self.nglayer is None:
+            assert isinstance(self.in_shape, tuple)
+            ikeys = ('C', 'H', 'W') if len(self.in_shape) == 3 else ('C', 'D', 'H', 'W')
+            shapedict = {k: x for k, x in zip(ikeys, self.in_shape)}
+            shapedict['N'] = self.be.bsz
+            self.lrnparams.update(shapedict)
+            self.nglayer = self.be.lrn_layer(self.be.default_dtype, **self.lrnparams)
+            self.out_shape = self.in_shape
+        return self
+
+    def allocate(self, shared_outputs=None):
+        super(LRN, self).allocate(shared_outputs)
+        self.denom = self.be.iobuf(self.in_shape)
+
+    def fprop(self, inputs, inference=False):
+        self.inputs = inputs
+        self.be.fprop_lrn(self.nglayer,
+                          inputs, self.outputs, self.denom,
+                          self.alpha, self.beta, self.ascale, self.bpower)
+        return self.outputs
+
+    def bprop(self, error):
+        if self.deltas:
+            self.be.bprop_lrn(self.nglayer,
+                              self.inputs, self.outputs, error, self.deltas, self.denom,
+                              self.alpha, self.beta, self.ascale, self.bpower)
+        return self.deltas
 
 
 class Dropout(Layer):
@@ -1003,6 +1050,7 @@ class LookupTable(ParameterLayer):
         self.vocab_size = vocab_size
         self.update = update
         self.pad_idx = pad_idx
+        self.outputs_t = None
 
     def __str__(self):
         return "LookupTable Layer : %d inputs, (%d, %d) outputs size" % (
@@ -1013,7 +1061,7 @@ class LookupTable(ParameterLayer):
         (self.nin, self.nsteps) = interpret_in_shape(self.in_shape)
         self.out_shape = (self.embedding_dim, self.nin)
         if self.weight_shape is None:
-            self.weight_shape = (self.embedding_dim, self.vocab_size)
+            self.weight_shape = (self.vocab_size, self.embedding_dim)
         return self
 
     def allocate(self):
@@ -1024,26 +1072,20 @@ class LookupTable(ParameterLayer):
         self.dW[:] = 0
         if self.pad_idx is not None:
             self.W[:, self.pad_idx] = 0
+        if self.outputs_t is None:
+            self.outputs_t = self.be.empty_like(self.outputs.T)
 
     def fprop(self, inputs, inference=False):
         self.inputs[:] = inputs.reshape(self.inputs.shape)
-        self.outputs[:] = self.W.take(self.inputs, axis=1)
+        self.outputs_t[:] = self.W.take(self.inputs, axis=0)
+        self.outputs[:] = self.outputs_t.T
         return self.outputs
 
     def bprop(self, error, alpha=1.0, beta=0):
-        if self.update:
-            self.dW[:] = 0
-            wrd_ids = self.inputs.get()[0]
-            unqidx, inv = np.unique(wrd_ids, return_inverse=True)
-            groups = [np.where(inv == i) for i in range(len(unqidx))]
-            for (wrd_id, group) in zip(unqidx, groups):
-                if self.pad_idx != wrd_id:
-                    self.dW[:, wrd_id] = self.be.sum(error.take(group[0], axis=1), axis=1)
-        """
-        alternative bprop
-        for (j, wrd_id) in enumerate(wrd_ids):
-            self.dW[:, wrd_id] = self.dW[:, wrd_id] + error[:, j]
-        """
+        self.dW[:] = 0
+        self.be.compound_bprop_lut(self.nin, self.inputs, error, self.outputs_t, self.dW,
+                                   self.pad_idx, alpha, beta)
+
         return self.deltas
 
 

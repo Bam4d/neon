@@ -17,7 +17,7 @@ import logging
 
 from neon import NervanaObject
 from neon.transforms import CrossEntropyBinary, Logistic
-from neon.util.persist import load_obj
+from neon.util.persist import load_obj, save_obj
 from neon.layers import Sequential, Activation, Tree
 import numpy as np
 
@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 class Model(NervanaObject):
     """
     Basic model class which stores a list of layers describing the model. Can train the layer
-    weights on a dataset, evaluate on a test set and serialize the mode.
-    Additional functionality can be added to fit through callback functions.
+    weights on a dataset, evaluate on a test set and serialize the model.
+    Additional functionality can be added to :func:`fit` through callback functions.
 
     Arguments:
         layers: layer container, or a list of layers (that will be containerized)
@@ -52,8 +52,11 @@ class Model(NervanaObject):
         self.layers_to_optimize = self.layers.layers_to_optimize
 
     def set_shortcut(self):
-        # infer whether bprop shortcut can be used on final activation
-        # self.cost should be set to run this otherwise do nothing
+        """
+        Utilize the faster shortcut backprop operation for an appropriately
+        paired cost and last layer activation function.  If such a pairing is
+        not found, this call has no effect.
+        """
         lastlayer = self.layers[-1]
         try:
             if self.cost.costfunc.__class__ is CrossEntropyBinary:
@@ -66,6 +69,25 @@ class Model(NervanaObject):
             pass
 
     def initialize(self, dataset, cost=None):
+        """
+        Performs initial setup and device buffer allocation required for each
+        layer.  Generally this will be called as part of the first call to
+        :func:`fit` or :func:`eval`, and subsequent calls will re-use the same
+        buffers.
+
+        Arguments:
+            dataset (iterator): An iterable of minibatches.
+            cost (Cost, optional): The cost function to be minimized (in the
+                                   case of model fitting).
+
+        Notes:
+            You will need to explicitly call initialize prior to subsequent
+            :func:`fit` or :func:`eval` calls if input data, the cost function,
+            or any of the layers change.  For instance if running eval prior to
+            the first fit, the cost will not be initialized during eval since
+            it isn't required.  An explicit :func:`initialize` call alleviates
+            this.
+        """
         if self.initialized:
             return
         # Propagate shapes through the layers to configure
@@ -249,26 +271,55 @@ class Model(NervanaObject):
             pdict['optimizer'] = self.optimizer.get_description()
         return pdict
 
-    def load_weights(self, weight_path):
+    def save_params(self, param_path, keep_states=True):
         """
-        Loads the layer weights saved in weight_path from serialize().
+        Serializes and saves model parameters to the path specified.
 
         Arguments:
-            weight_path (str): File containing serialized python dict with layer
-                               weights and states.
+            param_path (str): File to write serialized parameter dict to.
+            keep_states (bool): Whether to save optimizer states too.
+                                Defaults to True.
         """
-        pdict = load_obj(weight_path)
+        save_obj(self.serialize(keep_states), param_path)
 
-        self.epoch_index = pdict['epoch_index']
+    def load_params(self, param_path):
+        """
+        Loads the model parameters (per layer weights, epochs run, optimizer
+        states) saved in param_path from serialize().
+
+        Arguments:
+            param_path (str): File containing serialized python dict with layer
+                              weights and states.
+        """
+        pdict = load_obj(param_path)
+        self.deserialize(pdict)
+        logger.info('Model weights loaded from %s', param_path)
+
+    def load_weights(self, weight_path):
+        """
+        .. deprecated:: 1.1.4
+           Use :func:`load_params` instead
+        """
+        logger.warning('Calling deprecated load_weights function.  Use '
+                       'load_params instead')
+        self.load_params(weight_path)
+
+    def deserialize(self, params):
+        """
+        Loads per layer (weights, states) and other model parameters from the
+        dictionary passed.
+
+        Arguments:
+            params (dict): parameters as returned by serialize().
+        """
+        self.epoch_index = params['epoch_index']
 
         param_layers = [l for l in self.layers_to_optimize]
-        param_dict_list = pdict['layer_params_states']
+        param_dict_list = params['layer_params_states']
         for l, ps in zip(param_layers, param_dict_list):
             l.set_params(ps['params'])
             if 'states' in ps:
                 l.set_states(ps['states'])
-
-        logger.info('Model weights loaded from %s', weight_path)
 
     # serialize tells how to write out the parameters we've learned so
     # far and associate them with layers. it can ignore layers with no
@@ -285,7 +336,6 @@ class Model(NervanaObject):
         Returns:
             dict: Model data including layer parameters and epochs complete.
         """
-
         pdict = dict()
         params_states = [l.get_params_serialize(keep_states) for l in self.layers_to_optimize]
         pdict['layer_params_states'] = params_states

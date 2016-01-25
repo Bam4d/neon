@@ -167,7 +167,9 @@ class CPUTensor(Tensor):
         defaults to 1.  If start_idx isn't specified it defaults to 0.  If
         stop_idx isn't specified it defaults to the total number of elements
         along that dimension.  As such a slice value of ':' allows one to
-        select all elements along that dimension
+        select all elements along that dimension. To be consistent with GPU
+        Tensors, CPU Tensors remove the axis that has size 1 unless it needs to
+        maintain 2D.
 
         Arguments:
             key (int, slice, tuple): indices of each dimension's slice.
@@ -187,25 +189,22 @@ class CPUTensor(Tensor):
         # let a.shape = (3,4)
         # a[1,1] = 10 # cpu, gpu and numpy
         # type(a[1,1]) # for cpu and gpu type is Tensor; for numpy type is float
-        first_int_idx = None
-        is_all_int = True
+        key_list = list(key)
         for idx, k in enumerate(key):
             if type(k) is int:
-                if first_int_idx is None:
-                    first_int_idx = idx
-            else:
-                is_all_int = False
-                break
-        if is_all_int:
-            key_list = list(key)
-            idx = key_list[first_int_idx]
-            key_list[first_int_idx] = slice(idx, idx + 1, None)
-            key = tuple(key_list)
+                k = self.shape[idx] + k if k < 0 else k
+                key_list[idx] = slice(k, k + 1, None)
+        key = tuple(key_list)
+
+        new_shape = list(self._tensor[key].shape)
+        for idx, k in enumerate(new_shape):
+            if len(new_shape) > 2 and k is 1:
+                new_shape.remove(k)
 
         # return a view of the tensor
         return self.__class__(
             backend=self.backend,
-            ary=self._tensor[key],
+            ary=self._tensor[key].reshape(new_shape),
             dtype=self._tensor.dtype)
 
     def _assign(self, value):
@@ -214,7 +213,7 @@ class CPUTensor(Tensor):
         for int and uint types, when overflow happens
 
         Arguments:
-            value (GPUTennsor, OpTreNode, numeric): the value to be assigned.
+            value (GPUTensor, OpTreeNode, numeric): the value to be assigned.
 
         """
         if isinstance(value, (CPUTensor, OpTreeNode)):
@@ -282,9 +281,11 @@ class CPUTensor(Tensor):
         # collapsed, hence the squeeze call.
         if type(indices) == np.ndarray:
             indices = indices.squeeze()
+        new_shape = list(self.shape)
+        new_shape[axis] = indices.size
         return self.__class__(
             backend=self.backend,
-            ary=self._tensor.take(indices, axis),
+            ary=self._tensor.take(indices, axis).reshape(new_shape),
             dtype=self._tensor.dtype)
 
     def fill(self, value):
@@ -505,11 +506,21 @@ class NervanaCPU(Backend):
 
         super(NervanaCPU, self).__init__(rng_seed, default_dtype, compat_mode=compat_mode)
 
+        # ensure an optimized BLAS is present and warn if not
+        try:
+            if not any(x in str(np.__config__.blas_opt_info['libraries']).lower()
+                       for x in ['openblas', 'atlas', 'mkl', 'accelerate']):
+                logger.warn("No accelerated BLAS libraries found, CPU "
+                            "performance may suffer.  Consider installing "
+                            "one of openblas, Atlas, MKL, or vecLib")
+        except (AttributeError, KeyError):
+            logger.warn("Problems inferring BLAS info, CPU performance may "
+                        "be suboptimal")
+
         self.device_type = 0
         self.device_id = 0
         self.tensor_cls = CPUTensor
 
-        # log
         logger.info("Initialized NervanaCPU")
 
         self.hist_bins = hist_bins
@@ -900,7 +911,7 @@ class NervanaCPU(Backend):
                    T=1, R=1, S=1,
                    pad_d=0, pad_h=0, pad_w=0,
                    str_d=1, str_h=1, str_w=1,
-                   bsum=False):
+                   bsum=False, deterministic_update=False):
         """
         Create a new ConvLayer parameter object.
         This then is passed as an argument to all the convolution operations.
@@ -924,6 +935,9 @@ class NervanaCPU(Backend):
 
         bsum: calculate the sum along the batchnorm axis for fprop or bprop
               outputs an fp32 tensor of size Kx1
+
+        deterministic_update: avoid use of atomic operations for update
+                              to make it deterministic (GPU only)
         """
         return ConvLayer(self, dtype, N, C, K, D, H, W, T, R, S,
                          pad_d, pad_h, pad_w, str_d, str_h, str_w)
@@ -1114,6 +1128,126 @@ class NervanaCPU(Backend):
         """
         return DeconvLayer(self, dtype, N, C, K, P, Q, R, S,
                            pad_d, pad_h, pad_w, str_d, str_h, str_w)
+
+    def lrn_layer(self, dtype, N, C, D=1, H=1, W=1, J=1):
+        """
+        Create a new PoolLayer parameter object.
+        This then is passed as an argument to all pooling kernels.
+
+        N: Number of images in mini-batch
+
+        C: Number of input feature maps
+        H: Height of input image
+        W: Width  of input image
+
+        J: Size of feature map pooling window (maxout n_pieces)
+
+        padding: amount of zero-padding around the given image or feature map edge
+        strides: factor to step the window by in a given direction (overlap allowed)
+
+        Leave spatial dimensions at 1 to allow feature map pooling in the fc layers.
+        """
+        assert J % 2 == 1, "Only support odd LRN window size"
+        pad_c = J / 2
+        op = 'lrn'
+        # Bunch of defaults since we're only interested in the k-axis
+        lrn_opts = dict(T=1, R=1, S=1,
+                        pad_c=pad_c,
+                        pad_d=0, pad_h=0, pad_w=0,
+                        str_c=1, str_d=1, str_h=1, str_w=1)
+
+        return PoolLayer(self, dtype, op, N, C, D, H, W, J, **lrn_opts)
+
+    def fprop_lrn(self, layer, I, O, denom, alpha=None, beta=None, ascale=1, bpower=1):
+        """
+        Forward propagate pooling layer.
+
+        Arguments:
+            layer (PoolLayer): The pool layer object, different backends have
+                               different pool layers.
+            I (Tensor): Input tensor.
+            O (Tensor): output tensor.
+            denom (Tensor): denominator tensor, stores the result of the squared pooling/contrast
+            ascale (float): scaling parameter (alpha) to multiply the pooled sum (1.25e-5 in AK)
+            bpower (float): exponential parameter (beta) to raise denominator by (0.75 in AK)
+        """
+
+        assert layer.sizeI == I.size
+        assert layer.sizeO == O.size
+
+        J, T, R, S = layer.JTRS
+        C, D, H, W, N = layer.dimI
+        K, M, P, Q, N = layer.dimO
+        pad_c, pad_d, pad_h, pad_w = layer.padding
+        str_c, str_d, str_h, str_w = layer.strides
+
+        array_I = I.get().reshape(layer.dimI)
+        array_O = O._tensor.reshape(layer.dimO)  # _tensor to write to
+        # although we can calculate directly into O, keeping denom around is useful for bprop
+        array_d = denom._tensor.reshape(layer.dimO)  # _tensor to write to
+
+        for k in range(K):
+            sliceC, _ = layer.kSlice[k]
+            _ascale = ascale / (sliceC.stop - sliceC.start)  # valid window size
+            for m in range(M):
+                sliceD, _ = layer.mSlice[m]
+                for p in range(P):
+                    sliceH, _ = layer.pSlice[p]
+                    for q in range(Q):
+                        sliceW, _ = layer.qSlice[q]
+                        sliceI = array_I[sliceC, sliceD, sliceH, sliceW, :].reshape(-1, N)
+                        array_d[k, m, p, q, :] = 1 + _ascale * np.sum(np.square(sliceI), axis=0)
+
+        array_O[:] = array_I * np.power(array_d, -bpower)  # elementwise divide by denominator
+
+    def bprop_lrn(self, layer, I, O, E, delta, denom, alpha=None, beta=None, ascale=1, bpower=1):
+        """
+        Backward propagate pooling layer.
+
+        Arguments:
+            layer (PoolLayer): The pool layer object. Different backends have
+                               different pool layers.
+            I (Tensor): Input tensor.
+            E (Tensor): Error tensor.
+            delta (Tensor): Gradient tensor (delta)
+            denom (Tensor): denominator tensor computed during bprop
+            ascale (float): scaling parameter (alpha) to multiply the pooled sum (1.25e-5 in AK)
+            bpower (float): exponential parameter (beta) to raise denominator by (0.75 in AK)
+        """
+
+        assert layer.sizeI == I.size
+        assert layer.sizeO == E.size
+        assert layer.sizeI == delta.size
+
+        J, T, R, S = layer.JTRS
+        C, D, H, W, N = layer.dimI
+        K, M, P, Q, N = layer.dimO
+        pad_c, pad_d, pad_h, pad_w = layer.padding
+        str_c, str_d, str_h, str_w = layer.strides
+
+        array_I = I.get().reshape(layer.dimI)
+        array_E = E.get().reshape(layer.dimO)
+        array_O = O.get().reshape(layer.dimO)
+        array_delta = delta._tensor.reshape(layer.dimI)  # write to
+        array_denom = denom.get().reshape(layer.dimO)
+
+        for k in range(K):
+            sliceC, _ = layer.kSlice[k]
+            for m in range(M):
+                sliceD, _ = layer.mSlice[m]
+                for p in range(P):
+                    sliceH, _ = layer.pSlice[p]
+                    for q in range(Q):
+                        sliceW, _ = layer.qSlice[q]
+
+                        _O = array_O[sliceC, sliceD, sliceH, sliceW, :].reshape(-1, N)
+                        _E = array_E[sliceC, sliceD, sliceH, sliceW, :].reshape(-1, N)
+                        _den = array_denom[sliceC, sliceD, sliceH, sliceW, :].reshape(-1, N)
+                        # temporarily store part of the derivative in here
+                        array_delta[k, m, p, q, :] = np.sum(_O * _E * _den, axis=0)
+
+        array_delta[:] = -2 * bpower * ascale * array_delta * array_I + (
+            array_E * np.power(array_denom, -bpower))
 
     def pool_layer(self, dtype,
                    op, N, C,
@@ -1312,6 +1446,33 @@ class NervanaCPU(Backend):
         grad_beta[:] = self.sum(delta, axis=1)
         xtmp = (xhat * grad_gamma + grad_beta) / float(x.shape[1])
         delta[:] = gamma * (delta - xtmp) / self.sqrt(xvar + eps)
+
+    def compound_bprop_lut(self, nin, inputs, error, error_t, dW, pad_idx, alpha=1.0, beta=0):
+        """
+        Backward propagate lookup table layer.
+
+        Arguments:
+            nin (integer): Number of input word_ids.
+            inputs (Tensor): Input tensor.
+            error (Tensor): Error tensor.
+            error_t (Tensor): Transposed error tensor.
+            dW (Tensor): Gradient tensor (delta).
+            pad_idx (integer):
+            alpha (float):
+            beta (float):
+        """
+        wrd_ids = inputs.get()[0]
+        unqidx, inv = np.unique(wrd_ids, return_inverse=True)
+        groups = [np.where(inv == i) for i in range(len(unqidx))]
+
+        for (wrd_id, group) in zip(unqidx, groups):
+            if wrd_id != pad_idx:
+                dW[wrd_id, :] = self.sum(error.take(group[0], axis=1), axis=1)
+        """
+        alternative bprop
+        for (j, wrd_id) in enumerate(wrd_ids):
+            dW[:, wrd_id] = dW[:, wrd_id] + error[:, j]
+        """
 
     def _hist_tensor(self, tag):
         """

@@ -78,7 +78,7 @@ class Callbacks(NervanaObject):
             self.callback_data = h5py.File(output_file, "w")
 
         if model_file:
-            model.load_weights(model_file)
+            model.load_params(model_file)
 
         self.model = model
         self.train_set = train_set
@@ -408,6 +408,15 @@ class SerializeModelCallback(Callback):
         self.checkpoint_files.append(save_path)
         save_obj(self.model.serialize(keep_states=True), save_path)
 
+        # maintain a symlink pointing to the latest model params
+        try:
+            if os.path.islink(self.save_path):
+                os.remove(self.save_path)
+            os.symlink(os.path.split(save_path)[-1], self.save_path)
+        except OSError:
+            logger.warn('Could not create latest model symlink %s -> %s'
+                        % (self.save_path, save_path))
+
 
 class RunTimerCallback(Callback):
     """
@@ -588,9 +597,9 @@ class MultiLabelStatsCallback(Callback):
             for i, label in enumerate(self.labels):
                 metric_text = "["
                 for k, metric in enumerate(self.metric.metric_names):
-                    metric_text += "%s: %d%% " % (metric, running_stats[k][i+1]*100.0)
+                    metric_text += "%s: %d%% " % (metric, running_stats[i][k]*100.0)
 
-                metric_text += " ] -> %s\n" % label
+                metric_text += "] -> %s\n" % label
                 sys.stdout.write(metric_text.encode('utf-8'))
                 sys.stdout.flush()
 
@@ -915,15 +924,13 @@ class DeconvCallback(Callback):
         Returns:
             img (ndarray): image array with valid RGB values
         """
-        absMax = np.max((abs(img)))
-        minVal = - absMax
-        img -= minVal
-        maxImg = np.max(img)
-        maxVal = max(absMax - minVal, maxImg)
-        if maxVal == 0:
-            maxVal = 1
-        img = img / maxVal * 255
-        return img
+        img_min = np.min(img)
+        img_rng = np.max(img) - img_min
+        img_255 = img - img_min
+        if img_rng > 0:
+            img_255 /= img_rng
+            img_255 *= 255.
+        return img_255
 
     def store_images(self, batch_ind, imgs_to_store, img_batch_data, C, H, W):
         n_imgs = len(imgs_to_store)
